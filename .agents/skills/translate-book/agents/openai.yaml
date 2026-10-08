@@ -1,0 +1,4 @@
+interface:
+  display_name: "Book Translation"
+  short_description: "Research, translate, review, and build EPUBs"
+  default_prompt: "Use $translate-book to translate the attached book into Russian with a researched glossary, editing, and an EPUB."

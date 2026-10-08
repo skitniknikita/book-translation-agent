@@ -1,0 +1,11 @@
+# Bootstrap only for the selection session. Full translation gets models from
+# verified book/work/model-selection.json, not from this configuration.
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+web_search = "live"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2

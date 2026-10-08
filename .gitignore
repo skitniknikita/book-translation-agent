@@ -1,0 +1,43 @@
+# Private books and workflow data.
+/books/
+/private/
+**/work/
+**/* — перевод/
+**/00_Глоссарий.md
+**/01_Перевод.md
+**/02_Примечания_переводчика.md
+**/03_Проверки.md
+*.epub
+*.pdf
+*.docx
+*.fb2
+*.mobi
+*.azw*
+*.zip
+# Credentials and local overrides.
+.env
+.env.*
+*.pem
+*.key
+.codex/auth.json
+.codex/config.local.toml
+# Generated files, environments, and OS/editor metadata.
+/dist/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+._*
+.AppleDouble/
+__MACOSX/
+.idea/
+.vscode/
+*.swp
+*.tmp
+*.log
