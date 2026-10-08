@@ -14,9 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = "release-files.txt"
 MANIFEST = "MANIFEST.sha256"
 ARCHIVE_ROOT = "book-translation-agent"
-PRIVATE_PARTS = {".git", ".env", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "books", "private", "work"}
-PRIVATE_NAMES = {".DS_Store", "auth.json", "01_Перевод.md", "01_Translation.md"}
-PRIVATE_SUFFIXES = {".epub", ".pdf", ".mobi", ".azw", ".azw3", ".docx", ".odt", ".pem", ".key", ".pyc"}
+PRIVATE_PARTS = {".git", ".env", ".venv", ".ssh", ".aws", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "books", "private", "work"}
+PRIVATE_NAMES = {
+    ".DS_Store", ".netrc", ".npmrc", "auth.json", "credentials.json",
+    "id_rsa", "id_ed25519", "config.local.toml",
+    "00_Глоссарий.md", "01_Перевод.md", "01_Translation.md",
+    "02_Примечания_переводчика.md", "03_Проверки.md",
+}
+PRIVATE_SUFFIXES = {".epub", ".pdf", ".mobi", ".azw", ".azw3", ".docx", ".odt", ".fb2", ".pem", ".key", ".pyc", ".log", ".zip", ".bundle"}
 
 
 class ReleaseError(ValueError):
@@ -31,7 +36,8 @@ def _relative_path(value: str) -> PurePosixPath:
         raise ReleaseError(f"release path must be relative and normalized: {value!r}")
     if path.name == MANIFEST:
         raise ReleaseError(f"{MANIFEST} is generated and cannot be allowlisted")
-    if any(part in PRIVATE_PARTS or part in PRIVATE_NAMES or part.startswith(("._", ".env")) for part in path.parts):
+    if any(part in PRIVATE_PARTS or part in PRIVATE_NAMES or part.startswith(("._", ".env"))
+           or part.endswith(" — перевод") for part in path.parts):
         raise ReleaseError(f"private or cache path is not releasable: {value!r}")
     if path.suffix.lower() in PRIVATE_SUFFIXES:
         raise ReleaseError(f"book source path is not releasable: {value!r}")
@@ -144,10 +150,12 @@ def build_zip(output: Path, root: Path = ROOT) -> None:
             for path in [*allowed, PurePosixPath(MANIFEST)]:
                 local = root / Path(*path.parts)
                 name = f"{ARCHIVE_ROOT}/{path.as_posix()}"
-                archive.write(local, name)
-                entry = archive.getinfo(name)
+                # Use neutral ZIP metadata instead of the author's local timestamps.
+                entry = zipfile.ZipInfo(name)
                 entry.create_system = 3
                 entry.external_attr = 0o100644 << 16
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(entry, local.read_bytes())
         temporary.replace(output)
     finally:
         if temporary is not None and temporary.exists():

@@ -49,6 +49,7 @@ class ReleaseTests(unittest.TestCase):
                 "book-translation-agent/MANIFEST.sha256",
             })
             self.assertEqual(archive.getinfo("book-translation-agent/README.md").external_attr >> 16, 0o100644)
+            self.assertEqual(archive.getinfo("book-translation-agent/README.md").date_time, (1980, 1, 1, 0, 0, 0))
 
     def test_tampered_allowlisted_file_fails_check(self):
         self.write("README.md", "changed\n")
@@ -79,11 +80,20 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(output.read_bytes(), b"old archive")
 
     def test_archive_output_cannot_collide_with_release_input(self):
-        self.write("release.zip", "not an archive yet")
-        self.write("release-files.txt", "README.md\nrelease.zip\n")
-        release.update_manifest(self.root)
-        with self.assertRaisesRegex(release.ReleaseError, "cannot overwrite"):
-            release.build_zip(self.root / "release.zip", self.root)
+        original = (self.root / "README.md").read_bytes()
+        with self.assertRaises(release.ReleaseError):
+            release.build_zip(self.root / "README.md", self.root)
+        self.assertEqual((self.root / "README.md").read_bytes(), original)
+
+    def test_allowlist_rejects_private_book_and_account_artifacts(self):
+        for path in ("release.zip", "history.bundle", ".npmrc", ".ssh/id_ed25519",
+                     "00_Глоссарий.md", "02_Примечания_переводчика.md",
+                     "03_Проверки.md", "Book — перевод/metadata.json",
+                     "debug.log", ".codex/config.local.toml"):
+            with self.subTest(path=path):
+                self.write("release-files.txt", path + "\n")
+                with self.assertRaises(release.ReleaseError):
+                    release.update_manifest(self.root)
 
     def test_zip_creates_missing_output_directory_after_checking_inputs(self):
         output = self.root.parent / "dist" / "release.zip"

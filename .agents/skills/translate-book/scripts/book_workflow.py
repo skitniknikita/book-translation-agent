@@ -39,8 +39,8 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def atomic_write(path, value):
-    path = Path(path)
+def atomic_write(path, value, *, root=None):
+    path = book_path(root, path) if root is not None else Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2) + "\n"
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".writing-")
@@ -62,12 +62,66 @@ def local_path(root, relative):
     return path
 
 
+def book_path(root, relative):
+    """Managed book files cannot use symlinks, including dangling links.
+
+    The user-selected root is resolved separately, so a linked book root itself
+    remains supported. Do not use this policy for the explicitly selected bank.
+    """
+    root = Path(root).resolve()
+    path = root / relative
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        raise ValueError("Путь выходит за папку книги") from None
+    if ".." in parts:
+        raise ValueError("Путь выходит за папку книги")
+    current = root
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError("Символические ссылки в рабочих файлах книги запрещены")
+    return local_path(root, path)
+
+
+def source_path(state, root):
+    source = state.get("source")
+    if (not isinstance(source, dict) or not isinstance(source.get("path"), str)
+            or not source["path"] or not isinstance(source.get("sha256"), str)
+            or (source.get("original_path") is not None
+                and not isinstance(source["original_path"], str))):
+        raise ValueError("Неверные сведения об исходнике в журнале книги")
+    return book_path(root, source["path"])
+
+
+def validate_chunks(state, block_ids):
+    chunks = state.get("chunks")
+    if not isinstance(chunks, list):
+        raise ValueError("Нужен список фрагментов в журнале книги")
+    seen = set()
+    for chunk in chunks:
+        if (not isinstance(chunk, dict) or not isinstance(chunk.get("id"), str)
+                or not ID.fullmatch(chunk["id"]) or chunk["id"] in seen):
+            raise ValueError("Неверный или повторный ID фрагмента в журнале книги")
+        ids = chunk.get("block_ids")
+        if (not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids)
+                or len(set(ids)) != len(ids) or set(ids) - block_ids):
+            raise ValueError("Неверные исходные ID фрагмента в журнале книги")
+        dependency = chunk.get("depends_on")
+        if dependency is not None and (not isinstance(dependency, str) or dependency not in seen):
+            raise ValueError("Зависимость должна указывать на предыдущий фрагмент")
+        if not isinstance(chunk.get("translations"), dict) or not isinstance(chunk.get("reviews"), dict):
+            raise ValueError("Неверный результат или проверки фрагмента в журнале книги")
+        seen.add(chunk["id"])
+
+
 def validate_blocks(blocks):
     if not isinstance(blocks, list) or not blocks:
         raise ValueError("Нужен непустой список исходных блоков")
     seen = set()
     for b in blocks:
-        if not isinstance(b, dict) or not ID.fullmatch(str(b.get("id", ""))) or b["id"] in seen:
+        if (not isinstance(b, dict) or not isinstance(b.get("id"), str)
+                or not ID.fullmatch(b["id"]) or b["id"] in seen):
             raise ValueError("Неверный или повторный ID блока")
         seen.add(b["id"])
         if b.get("kind") not in KINDS or not isinstance(b.get("text"), str) or not b["text"].strip():
@@ -84,17 +138,28 @@ def validate_blocks(blocks):
 class Book:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        self.work = self.root / "work"
-        self.path = self.work / "state.json"
+        self.work = book_path(self.root, "work")
+        self.path = book_path(self.root, "work/state.json")
         self.state = read_json(self.path)
-        if self.state.get("schema_version") != 2:
+        if not isinstance(self.state, dict) or self.state.get("schema_version") != 2:
             raise ValueError("Нужна новая рабочая папка schema_version=2; прежние книги автоматически не мигрируются")
-        self.blocks = validate_blocks(read_json(self.work / "source-blocks.json"))
+        self.blocks = validate_blocks(read_json(self.storage("work/source-blocks.json")))
         if digest(self.blocks) != self.state["blocks_sha256"]:
             raise ValueError("Извлечённый исходник изменён. Нужна явная повторная приёмка, не продолжение старых проверок")
-        if file_hash(local_path(self.root, self.state["source"]["path"])) != self.state["source"]["sha256"]:
+        if file_hash(source_path(self.state, self.root)) != self.state["source"]["sha256"]:
             raise ValueError("Копия исходника изменена")
         self.by_id = {b["id"]: b for b in self.blocks}
+        validate_chunks(self.state, set(self.by_id))
+
+    def storage(self, relative):
+        return book_path(self.root, relative)
+
+    def write(self, path, value):
+        # Recheck the journal too before a multi-file operation writes anything.
+        self.storage("work/state.json")
+        validate_chunks(self.state, set(self.by_id))
+        source_path(self.state, self.root)
+        atomic_write(path, value, root=self.root)
 
     @classmethod
     def initialize(cls, root, source, blocks, selection=None, order="meaning-first"):
@@ -103,7 +168,11 @@ class Book:
         validate_blocks(blocks)
         if order != "meaning-first":
             raise ValueError("Новый порядок включается командой compare-order после сравнения первой главы")
-        work = root / "work"
+        work = book_path(root, "work")
+        source_name = "source-original" + source.suffix
+        for name in ("state.json", "source-blocks.json", source_name,
+                     "model-selection.json", "model-catalog.json"):
+            book_path(root, work / name)
         if (work / "state.json").exists():
             raise ValueError("Книга уже создана; используйте status для продолжения")
         if work.exists() and any(p.name not in {"model-selection.json", "model-catalog.json"} for p in work.iterdir()):
@@ -120,23 +189,22 @@ class Book:
         if chosen is not None:
             validate_selection(chosen, source, require_fresh=True)
         work.mkdir(parents=True, exist_ok=True)
-        source_name = "source-original" + source.suffix
-        (work / source_name).write_bytes(raw)
-        atomic_write(work / "source-blocks.json", blocks)
+        book_path(root, work / source_name).write_bytes(raw)
+        atomic_write(work / "source-blocks.json", blocks, root=root)
         if selection is not None and not (work / "model-selection.json").exists():
-            atomic_write(work / "model-selection.json", selection)
+            atomic_write(work / "model-selection.json", selection, root=root)
         atomic_write(work / "state.json", {
             "schema_version": 2, "created_at": now(),
             "source": {"path": "work/" + source_name, "original_path": str(source), "sha256": digest(raw)},
             "blocks_sha256": digest(blocks), "review_order": order,
             "model_selection_sha256": file_hash(work / "model-selection.json") if chosen is not None else None,
             "glossary": None, "chunks": [], "calibration": None, "epub": None,
-        })
+        }, root=root)
         return cls(root)
 
     def save(self):
         self.state["updated_at"] = now()
-        atomic_write(self.path, self.state)
+        self.write(self.storage("work/state.json"), self.state)
 
     def evidence(self, path):
         p = local_path(self.root, path)
@@ -151,7 +219,7 @@ class Book:
             return False
 
     def models(self):
-        path = self.work / "model-selection.json"
+        path = self.storage("work/model-selection.json")
         if file_hash(path) != self.state.get("model_selection_sha256"):
             raise ValueError("Выбор моделей изменён или не закреплён; используйте reselect с обоснованием")
         selection = validate_selection(read_json(path), local_path(self.root, self.state["source"]["path"]), require_fresh=False)
@@ -161,10 +229,10 @@ class Book:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Нужна причина нового выбора моделей")
         validate_selection(selection, local_path(self.root, self.state["source"]["path"]), require_fresh=True)
-        path = self.work / "model-selection.json"
+        path = self.storage("work/model-selection.json")
         if path.exists():
-            atomic_write(self.work / "model-history" / (file_hash(path) + ".json"), read_json(path))
-        atomic_write(path, selection)
+            self.write(self.storage("work/model-history/" + file_hash(path) + ".json"), read_json(path))
+        self.write(path, selection)
         self.state["model_selection_sha256"] = file_hash(path)
         self.state["model_change_reason"] = reason
         self.state["calibration"] = None
@@ -178,8 +246,8 @@ class Book:
         if not g:
             return False
         try:
-            return (file_hash(self.root / "00_Глоссарий.md") == g["markdown_sha256"]
-                    and file_hash(self.work / "terms.json") == g["terms_file_sha256"]
+            return (file_hash(self.storage("00_Глоссарий.md")) == g["markdown_sha256"]
+                    and file_hash(self.storage("work/terms.json")) == g["terms_file_sha256"]
                     and self.evidence_current(g["evidence"]))
         except OSError:
             return False
@@ -213,17 +281,18 @@ class Book:
             if set(b.get("term_ids", [])) - term_ids:
                 raise ValueError("В блоке указан неизвестный термин")
         proof = self.evidence(evidence)
-        md_hash = file_hash(self.root / "00_Глоссарий.md")
+        md_hash = file_hash(self.storage("00_Глоссарий.md"))
         if global_rules is not None and (not isinstance(global_rules, str) or not global_rules.strip()):
             raise ValueError("Общие правила должны быть непустым текстом или null")
-        atomic_write(self.work / "terms.json", terms)
+        self.storage("work/term-index.json")
+        self.write(self.storage("work/terms.json"), terms)
         self.state["glossary"] = {
-            "markdown_sha256": md_hash, "terms_file_sha256": file_hash(self.work / "terms.json"),
+            "markdown_sha256": md_hash, "terms_file_sha256": file_hash(self.storage("work/terms.json")),
             "index_complete": bool(index_complete), "coverage": list(coverage), "evidence": proof,
             "global_rules": global_rules, "global_sha256": digest(global_rules) if global_rules else md_hash,
             "approved_at": now(),
         }
-        atomic_write(self.work / "term-index.json", {t["id"]: {
+        self.write(self.storage("work/term-index.json"), {t["id"]: {
             "decision_sha256": digest(t), "block_ids": [b["id"] for b in self.blocks if t["id"] in b.get("term_ids", [])]
         } for t in terms})
         self.state["epub"] = None
@@ -232,7 +301,7 @@ class Book:
     def term_subset(self, chunk):
         if not self.glossary_current():
             raise ValueError("Нужен актуальный исследованный глоссарий")
-        terms = read_json(self.work / "terms.json")
+        terms = read_json(self.storage("work/terms.json"))
         ids = {t for ident in chunk["block_ids"] for t in self.by_id[ident].get("term_ids", [])}
         if not self.state["glossary"]["index_complete"]:
             return terms
@@ -260,7 +329,7 @@ class Book:
             self.validate_trial(read_json(local_path(self.root, case["draft"])), ids)
             trials.append({"kind": case["kind"], "source_ids": ids, "draft": draft,
                            "worker_evidence": self.evidence(case["worker_evidence"])})
-        self.state["calibration"] = {"selection_sha256": file_hash(self.work / "model-selection.json"),
+        self.state["calibration"] = {"selection_sha256": file_hash(self.storage("work/model-selection.json")),
                                      "evidence": self.evidence(record["report"]), "trials": trials,
                                      "model_evidence": self.evidence(record["model_evidence"]), "at": now()}
         self.save()
@@ -275,7 +344,7 @@ class Book:
         return bool(c and self.evidence_current(c["evidence"])
                     and self.evidence_current(c["model_evidence"])
                     and all(self.evidence_current(t["draft"]) and self.evidence_current(t["worker_evidence"]) for t in c["trials"])
-                    and c["selection_sha256"] == file_hash(self.work / "model-selection.json"))
+                    and c["selection_sha256"] == file_hash(self.storage("work/model-selection.json")))
 
     def compare_order(self, record):
         first_section = self.blocks[0]["section"]
@@ -299,14 +368,14 @@ class Book:
             self.validate_trial(trial, [b["id"] for b in originals])
         self.state["order_comparison"] = {"chapter_id": record["chapter_id"], "accepted": record["accepted"],
                                            "reports": evidence, "at": now(),
-                                           "models": file_hash(self.work / "model-selection.json")}
+                                           "models": file_hash(self.storage("work/model-selection.json"))}
         self.state["review_order"] = "language-first" if record["accepted"] else "meaning-first"
         self.save()
 
     def effective_order(self):
         comparison = self.state.get("order_comparison")
         if (self.state["review_order"] == "language-first" and comparison and comparison["accepted"]
-                and comparison["models"] == file_hash(self.work / "model-selection.json")
+                and comparison["models"] == file_hash(self.storage("work/model-selection.json"))
                 and all(self.evidence_current(e) for e in comparison["reports"].values())):
             return "language-first"
         return "meaning-first"
@@ -316,7 +385,7 @@ class Book:
             raise ValueError("План уже сохранён; автоматическое переразбиение готовой работы запрещено")
         calibrated = self.state.get("calibration")
         calibrated = bool(calibrated and self.evidence_current(calibrated["evidence"])
-                          and calibrated["selection_sha256"] == file_hash(self.work / "model-selection.json"))
+                          and calibrated["selection_sha256"] == file_hash(self.storage("work/model-selection.json")))
         chunks, current, previous = [], [], {}
 
         def flush():
@@ -344,6 +413,9 @@ class Book:
         return [{k: c[k] for k in ("id", "section", "block_ids", "depends_on")} for c in chunks]
 
     def chunk(self, ident):
+        if not isinstance(ident, str) or not ID.fullmatch(ident):
+            raise ValueError("Неверный ID фрагмента")
+        validate_chunks(self.state, set(self.by_id))
         for c in self.state["chunks"]:
             if c["id"] == ident:
                 return c
@@ -358,7 +430,7 @@ class Book:
                 "terms": digest(self.term_subset(c)),
                 "global_rules": self.state["glossary"]["global_sha256"],
                 "translation": digest(c["translations"]),
-                "models": file_hash(self.work / "model-selection.json"), "context": context}
+                "models": file_hash(self.storage("work/model-selection.json")), "context": context}
 
     def review_current(self, c, stage):
         r = c["reviews"].get(stage)
@@ -395,7 +467,7 @@ class Book:
             packet["terms"] = [{k: v for k, v in t.items() if k not in {"sources", "search_log"}} for t in terms]
             packet["global_rules"] = self.state["glossary"]["global_rules"]
             if packet["global_rules"] is None:
-                packet["global_rules"] = (self.root / "00_Глоссарий.md").read_text(encoding="utf-8")
+                packet["global_rules"] = self.storage("00_Глоссарий.md").read_text(encoding="utf-8")
             packet["versions"] = self.versions(c)
             packet["model"] = selection["leader" if stage in {"meaning", "terminology"} else "worker"]
             if stage == "draft" and c["depends_on"]:
@@ -413,12 +485,15 @@ class Book:
                 packet["blocks"] = [self.by_id[i] for i in c["block_ids"]]
                 if stage != "draft":
                     packet["translation"] = c["translations"]
-        path = self.work / "packets" / f"{ident}-{stage}.json"
-        atomic_write(path, packet)
+        path = self.storage(f"work/packets/{ident}-{stage}.json")
+        self.write(path, packet)
         return {"path": str(path), "sha256": file_hash(path), "block_count": len(c["block_ids"])}
 
     def verify_packet(self, c, stage, expected_hash):
-        path = self.work / "packets" / f"{c['id']}-{stage}.json"
+        if stage not in {"draft", *STAGES}:
+            raise ValueError("Неизвестный этап")
+        self.chunk(c["id"])
+        path = self.storage(f"work/packets/{c['id']}-{stage}.json")
         p = read_json(path)
         if file_hash(path) != expected_hash or p.get("versions") != self.versions(c):
             raise ValueError("Результат относится к устаревшему заданию")
@@ -534,14 +609,14 @@ class Book:
                 raise ValueError("Токены должны быть неотрицательным числом или null")
         if record.get("input_tokens") is not None and record.get("cached_input_tokens") is not None and record["cached_input_tokens"] > record["input_tokens"]:
             raise ValueError("Кеш входит во входные токены")
-        p = self.work / "usage.jsonl"
+        p = self.storage("work/usage.jsonl")
         records = [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
         for existing in records:
             if existing["task_id"] == record["task_id"]:
                 if existing == record:
                     return False
                 raise ValueError("Повторный task_id с другими метриками")
-        atomic_write(p, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records + [record]))
+        self.write(p, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records + [record]))
         return True
 
     def assemble(self):
@@ -562,11 +637,11 @@ class Book:
                 anchor = "bt-" + b["id"]
                 anchors.append(anchor)
                 parts.append(f"::: {{#{anchor}}}\n\n{text}\n\n:::")
-        target = self.root / "01_Перевод.md"
+        target = self.storage("01_Перевод.md")
         assembled = "\n\n".join(parts) + "\n"
         if target.exists() and file_hash(target) != self.state.get("assembly_sha256"):
             raise ValueError("01_Перевод.md содержит внешние правки: перенесите их в блоки и повторите проверки перед сборкой")
-        atomic_write(target, assembled)
+        self.write(target, assembled)
         self.state["assembly_sha256"] = file_hash(target)
         self.save()
         return target, anchors
@@ -574,15 +649,18 @@ class Book:
     def build(self, output, metadata="metadata.json", css=None):
         from epub_builder import build_epub
         destination = local_path(self.root, output)
+        glossary = self.storage("00_Глоссарий.md")
+        metadata_path = local_path(self.root, metadata)
+        css_path = local_path(self.root, css) if css else None
+        self.asset_paths()
         protected = {local_path(self.root, self.state["source"]["path"])}
         if self.state["source"].get("original_path"):
             protected.add(Path(self.state["source"]["original_path"]).resolve())
         if destination in protected:
             raise ValueError("Нельзя перезаписывать оригинал результатом сборки")
         text, anchors = self.assemble()
-        result = build_epub(self.root, text, self.root / "00_Глоссарий.md",
-                            local_path(self.root, metadata), local_path(self.root, output),
-                            local_path(self.root, css) if css else None, expected_ids=anchors)
+        result = build_epub(self.root, text, glossary, metadata_path, destination,
+                            css_path, expected_ids=anchors)
         self.state["epub"] = {"path": output, "sha256": file_hash(local_path(self.root, output)),
                               "metadata": metadata, "css": css,
                               "validated_at": now(), "checks": result}
@@ -590,14 +668,19 @@ class Book:
         self.save()
         return result
 
+    def asset_paths(self):
+        # Validate all entries before reading any; is_file() alone follows links.
+        paths = [self.storage(p) for p in sorted(self.storage("assets").rglob("*"))]
+        return [p for p in paths if p.is_file()]
+
     def build_fingerprint(self):
         epub = self.state["epub"]
-        resources = {str(p.relative_to(self.root)): file_hash(p) for p in sorted((self.root / "assets").rglob("*")) if p.is_file()}
+        resources = {str(p.relative_to(self.root)): file_hash(p) for p in self.asset_paths()}
         for item in epub.get("checks", {}).get("input_resources", []):
             resources[item["path"]] = file_hash(local_path(self.root, item["path"]))
         return digest({"versions": [self.versions(c) for c in self.state["chunks"]],
-                       "translation_file": file_hash(self.root / "01_Перевод.md"),
-                       "glossary_file": file_hash(self.root / "00_Глоссарий.md"),
+                       "translation_file": file_hash(self.storage("01_Перевод.md")),
+                       "glossary_file": file_hash(self.storage("00_Глоссарий.md")),
                        "metadata": file_hash(local_path(self.root, epub["metadata"])),
                        "css": file_hash(local_path(self.root, epub["css"])) if epub.get("css") else None,
                        "assets": resources})
@@ -676,7 +759,7 @@ def main(argv=None):
             elif args.command == "build": result = book.build(args.output, args.metadata, args.css)
             elif args.command == "bank":
                 if not book.glossary_current(): raise ValueError("Сначала утвердите глоссарий")
-                result = bank_merge(args.path, args.author, read_json(book.work / "terms.json"))
+                result = bank_merge(args.path, args.author, read_json(book.storage("work/terms.json")))
             else: result = getattr(book, args.command)()
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0

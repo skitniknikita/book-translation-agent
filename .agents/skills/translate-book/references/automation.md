@@ -16,6 +16,8 @@ python3 .agents/skills/translate-book/scripts/book_workflow.py --book-dir "Но�
 
 `init` copies the original to `work/source-original.ext`; it does not modify the source file. It does not overwrite an existing or nonempty working folder. The schema 2 program does not migrate an older `state.json`: an existing translation continues under the earlier protocol, or a separate migration is planned only on the user's explicit instruction.
 
+Managed work files and directories must be real files and directories inside the book, not symlinks. A symlink used to select the book root itself is supported. Do not weaken containment checks to make an imported journal pass; inspect the paths and recover its ordinary local files instead. The explicitly chosen author bank remains a separate destination.
+
 ## Research and Approval
 
 `plan` preserves every source ID exactly once, without splitting a block or section. If a large block exceeds the guideline, it remains whole; the lead decides whether it can be split into sub-blocks before `init`. A plan may be created before the glossary for scouting; the `scout` packet is available without approval. Do not rebuild the plan over completed work. To enlarge simple parts, calibrate the model before planning on two manually selected passages, then submit their translations through ordinary `submit`—do not generate them again.
@@ -72,6 +74,8 @@ The default remains meaning-first. A language-first candidate requires compariso
 ## Build
 
 Prepare `metadata.json` (or YAML that Pandoc reads): title, author, lang, rights, source, and unofficial_note marked «Неофициальный перевод». Include author and source information in the book's text blocks as well. Add `epub.css` if needed. Store images in a local assets folder and use relative links. Translate text inside images alongside them, preserving the original scheme.
+
+Relative image paths are based on the book root, even for Markdown files in subfolders. EPUB conversion checks and consumes one combined document with its metadata. Use static HTML/CSS/SVG: active content, external embedded resources, CSS escapes/imports/resource functions, and SVG animations/DTD/processing instructions are rejected. Ordinary CSS, static SVG, fragment links, notes, and citations remain supported. Preserve rejected source material separately and explain the needed conversion; do not bypass these checks.
 
 ```sh
 python3 .agents/skills/translate-book/scripts/book_workflow.py --book-dir "Новая книга" build --metadata metadata.json --output "Автор — Название.epub"

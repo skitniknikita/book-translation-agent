@@ -216,6 +216,126 @@ class EpubBuilderTests(unittest.TestCase):
             ["assets/pixel.png", "epub.css"],
         )
 
+    def assert_rejected_before_writer(self, pattern):
+        original = epub_builder._run_pandoc
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(args[1])
+            return original(*args, **kwargs)
+
+        self.output.write_bytes(b"previous-good-epub")
+        with patch.object(epub_builder, "_run_pandoc", side_effect=spy):
+            with self.assertRaisesRegex(epub_builder.EpubBuildError, pattern):
+                self.build(expected_ids=())
+        self.assertFalse(any("--to=epub3" in args for args in calls))
+        self.assertEqual(self.output.read_bytes(), b"previous-good-epub")
+
+    def test_cross_file_reference_cannot_expose_outside_file_or_fetch_url(self):
+        outside = Path(self.temp.name) / "synthetic-secret.png"
+        outside.write_bytes((self.book / "assets/pixel.png").read_bytes() + b"SYNTHETIC SECRET")
+        self.glossary.write_text("Термин.\n\n![Схема][hidden]", encoding="utf-8")
+        for target in (str(outside), "https://example.test/track.png"):
+            with self.subTest(target=target):
+                self.translation.write_text(
+                    "# Глава\n\nАвторский текст.\n\n[hidden]: " + target, encoding="utf-8"
+                )
+                self.assert_rejected_before_writer("Внешний|пределы")
+
+    def test_nested_markdown_uses_checked_root_resource_not_source_folder(self):
+        nested = self.book / "chapters"
+        nested.mkdir()
+        self.translation = nested / "translation.md"
+        self.translation.write_text("# Глава\n\n![Схема](pixel.png)", encoding="utf-8")
+        image = (self.book / "assets/pixel.png").read_bytes()
+        (nested / "pixel.png").write_bytes(image + b"DECOY")
+        (self.book / "pixel.png").write_bytes(image)
+        report = self.build(expected_ids=())
+        self.assertEqual([x["path"] for x in report["input_resources"]], ["pixel.png"])
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(
+                [archive.read(x) for x in archive.namelist() if "/media/" in x], [image]
+            )
+        outside = Path(self.temp.name) / "synthetic-secret.png"
+        outside.write_bytes(image + b"SYNTHETIC SECRET")
+        (self.book / "pixel.png").unlink()
+        (self.book / "pixel.png").symlink_to(outside)
+        self.assert_rejected_before_writer("пределы")
+
+    def test_metadata_images_checked_before_writer(self):
+        outside = Path(self.temp.name) / "synthetic-secret.png"
+        outside.write_bytes((self.book / "assets/pixel.png").read_bytes())
+        for target in (str(outside), "https://example.test/track.png"):
+            with self.subTest(target=target):
+                self.write_metadata(title=f"![Схема]({target})")
+                self.assert_rejected_before_writer("Внешний|пределы")
+
+    def test_native_markdown_attributes_cannot_embed_resources_or_handlers(self):
+        payloads = (
+            ('::: {style="background-image: url(https://example.test/track.png)"}\n\nТекст.\n\n:::', "CSS EPUB"),
+            ('[Текст.]{onclick="alert(1)"}', "HTML-обработчик"),
+            ('::: {onclick="alert(1)"}\n\nТекст.\n\n:::', "HTML-обработчик"),
+            ('<svg xmlns="http://www.w3.org/2000/svg"><path fill="url(https://example.test/fill.svg#x)"/></svg>', "CSS EPUB"),
+            ('<video poster="https://example.test/track.png"></video>', "Внешний"),
+            ('<meta http-equiv="refresh" content="0;url=https://example.test/redirect" />', "raw HTML-тег"),
+            ('<svg:svg xmlns:svg="http://www.w3.org/2000/svg"><svg:script>alert(1)</svg:script></svg:svg>', "raw HTML-тег"),
+            ('<svg:svg xmlns:svg="http://www.w3.org/2000/svg"><svg:set attributeName="href" to="https://example.test/track.png"/></svg:svg>', "raw HTML-тег"),
+        )
+        for payload, pattern in payloads:
+            with self.subTest(payload=payload):
+                self.translation.write_text("# Глава\n\n" + payload, encoding="utf-8")
+                self.assert_rejected_before_writer(pattern)
+
+    def test_css_escaped_and_alternate_resource_functions_are_rejected(self):
+        stylesheet = self.book / "epub.css"
+        payloads = (
+            r'p { background-image: u\72l(https://example.test/track.png); }',
+            r'@\69mport "https://example.test/style.css";',
+            'p { background-image: image-set("https://example.test/track.png" 1x); }',
+            'p { background-image: -webkit-image-set("https://example.test/track.png" 1x); }',
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                stylesheet.write_text(payload, encoding="utf-8")
+                with self.assertRaisesRegex(epub_builder.EpubBuildError, "CSS EPUB"):
+                    self.build(css=stylesheet)
+
+    def test_svg_animation_dtd_and_stylesheet_pi_are_rejected_before_writer(self):
+        svg = self.book / "assets/static.svg"
+        payloads = (
+            '<image id="x" href="#x"/><set href="#x" attributeName="href" to="https://example.test/track.png" begin="0s"/>',
+            '<animate attributeName="href" values="#x;https://example.test/track.png"/>',
+        )
+        documents = [
+            '<svg xmlns="http://www.w3.org/2000/svg">' + payload + '</svg>' for payload in payloads
+        ]
+        documents.extend((
+            '<?xml-stylesheet type="text/css" href="https://example.test/style.css"?><svg xmlns="http://www.w3.org/2000/svg"/>',
+            '<!DOCTYPE svg SYSTEM "https://example.test/remote.dtd"><svg xmlns="http://www.w3.org/2000/svg"/>',
+        ))
+        self.translation.write_text("# Глава\n\n![Схема](assets/static.svg)", encoding="utf-8")
+        for document in documents:
+            for encoding in ("utf-8", "utf-16"):
+                with self.subTest(document=document, encoding=encoding):
+                    svg.write_text(document, encoding=encoding)
+                    self.assert_rejected_before_writer("SVG")
+
+    def test_static_svg_and_self_contained_css_remain_supported(self):
+        svg = self.book / "assets/static.svg"
+        svg.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<defs><linearGradient id="gradient"><stop offset="0" stop-color="red"/></linearGradient></defs>'
+            '<rect width="10" height="10" fill="url(#gradient)"/></svg>', encoding="utf-8"
+        )
+        self.translation.write_text(
+            '# Глава\n\n[Текст.]{style="font-variant: small-caps"}\n\n'
+            '[Источник](https://example.test/source)\n\n![Схема](assets/static.svg)', encoding="utf-8"
+        )
+        css = self.book / "epub.css"
+        css.write_text('/* Обычный комментарий. */ body { font-family: serif; }', encoding="utf-8")
+        self.assertTrue(self.build(css=css, expected_ids=())["reverse_text_checked"])
+
 
 if __name__ == "__main__":
     unittest.main()

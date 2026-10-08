@@ -17,8 +17,16 @@
 # Credentials and local overrides.
 .env
 .env.*
+.netrc
+.npmrc
+.ssh/
+.aws/
+id_rsa
+id_ed25519
+credentials.json
 *.pem
 *.key
+*.bundle
 .codex/auth.json
 .codex/config.local.toml
 # Generated files, environments, and OS/editor metadata.

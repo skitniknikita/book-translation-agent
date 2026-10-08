@@ -35,6 +35,9 @@ _BLOCK_ID = re.compile(r"bt-[A-Za-z0-9_-]+\Z")
 _WORD = re.compile(r"[^\W_]+(?:[’'-][^\W_]+)*", re.UNICODE)
 _CSS_IMPORT = re.compile(r"@import\b", re.IGNORECASE)
 _CSS_URL = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE | re.DOTALL)
+_CSS_RESOURCE_FUNCTION = re.compile(r"\b(?:-webkit-)?(?:image-set|image|src)\s*\(", re.IGNORECASE)
+_CSS_PRESENTATION_ATTRS = {"fill", "stroke", "filter", "clip-path", "mask", "cursor",
+                           "marker", "marker-start", "marker-mid", "marker-end"}
 
 
 class EpubBuildError(ValueError):
@@ -83,8 +86,7 @@ def build_epub(
         raise EpubBuildError("Недопустимый ID блока: " + ", ".join(invalid))
 
     pandoc = _pandoc_path()
-    resources = _preflight_markdown(root, glossary, pandoc)
-    resources.update(_preflight_markdown(root, translation, pandoc))
+    resources: set[Path] = set()
     if css_path is not None:
         _reject_unsafe_css(css_path)
         resources.add(css_path)
@@ -99,6 +101,7 @@ def build_epub(
         work = Path(temporary)
         combined = work / "book.md"
         canonical_metadata = work / "metadata.yaml"
+        checked_document = work / "book.json"
         candidate = work / "book.epub"
         combined.write_text(
             _combined_markdown(glossary, translation, metadata_values), encoding="utf-8"
@@ -108,26 +111,39 @@ def build_epub(
         canonical_metadata.write_text(
             json.dumps(_canonical_metadata(metadata_values), ensure_ascii=False), encoding="utf-8"
         )
+        # Parse the final document once, including shared reference definitions
+        # and metadata.  The writer receives this exact validated AST, rather
+        # than reparsing a different combination of Markdown files.
+        rendered = _run_pandoc(
+            pandoc,
+            ["--from=markdown+fenced_divs+footnotes+pipe_tables", "--to=json",
+             "--standalone", "--metadata-file", str(canonical_metadata), str(combined)],
+            cwd=root,
+        )
+        try:
+            document = json.loads(rendered)
+        except json.JSONDecodeError as error:
+            raise EpubBuildError("Pandoc вернул некорректный AST книги") from error
+        resources.update(_preflight_document(root, document, root / "book.md"))
+        checked_document.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         _run_pandoc(
             pandoc,
             [
-                "--from=markdown+fenced_divs+footnotes+pipe_tables",
+                "--from=json",
                 "--to=epub3",
                 "--standalone",
                 "--toc",
                 "--epub-title-page",
-                "--metadata-file",
-                str(canonical_metadata),
                 "--resource-path",
                 str(root),
                 "--output",
                 str(candidate),
-                str(combined),
+                str(checked_document),
             ]
             + (["--css", str(css_path)] if css_path is not None else []),
             cwd=root,
         )
-        source_plain = _pandoc_plain(pandoc, combined, cwd=root)
+        source_plain = _pandoc_plain(pandoc, checked_document, cwd=root, input_format="json")
         report = validate_epub(
             candidate,
             expected_ids=expected,
@@ -411,25 +427,25 @@ def _html_text(value: str) -> str:
     return html.escape(value, quote=False).replace("\n", " ")
 
 
-def _preflight_markdown(root: Path, path: Path, pandoc: Path) -> set[Path]:
-    """Validate every Markdown image target before the EPUB writer runs.
+def _preflight_document(root: Path, document: object, path: Path) -> set[Path]:
+    """Check the entire final AST before resource-consuming EPUB conversion.
 
-    Pandoc's JSON reader expands reference-style images without loading their
-    targets.  This is intentionally a separate read-only process: a hostile
-    ``![x][ref]`` cannot make the EPUB conversion fetch a remote URL first.
-    Raw HTML is not represented as Image nodes, so it receives a strict HTML
-    pass as well.
+    ``path.parent`` is the writer's resource base, not an original Markdown
+    file's folder.  Canonical image paths also prevent a different resource
+    search order from substituting an unchecked file.
     """
-    rendered = _run_pandoc(
-        pandoc,
-        ["--from=markdown+fenced_divs+footnotes+pipe_tables", "--to=json", str(path)],
-        cwd=root,
-    )
-    try:
-        document = json.loads(rendered)
-    except json.JSONDecodeError as error:
-        raise EpubBuildError(f"Pandoc вернул некорректный AST для {path.name}") from error
     resources: set[Path] = set()
+    for attrs in _pandoc_attributes(document):
+        for name, value in attrs:
+            name = name.lower()
+            if name.startswith("on"):
+                raise EpubBuildError(f"В книге запрещён HTML-обработчик {name}")
+            if name == "style" or name in _CSS_PRESENTATION_ATTRS:
+                _reject_css_text(value, path.name)
+            elif name in {"src", "srcset", "data", "href", "poster", "background"}:
+                # Structural Link/Image targets are checked separately.
+                # Attr-based resource overrides have no book-formatting use.
+                raise EpubBuildError(f"В книге запрещён атрибут ресурса {name}")
     for node in _pandoc_nodes(document):
         if node.get("t") != "Image":
             continue
@@ -439,7 +455,9 @@ def _preflight_markdown(root: Path, path: Path, pandoc: Path) -> set[Path]:
         target = content[2]
         if not isinstance(target, list) or not target or not isinstance(target[0], str):
             raise EpubBuildError(f"Некорректный путь изображения в {path.name}")
-        resources.update(_validate_local_resource(root, target[0], path))
+        checked = _validate_local_resource(root, target[0], path)
+        resources.update(checked)
+        target[0] = str(next(iter(checked)))
     inspector = _RawHtmlInspector(root, path)
     try:
         for fragment in _raw_html_fragments(document):
@@ -451,6 +469,22 @@ def _preflight_markdown(root: Path, path: Path, pandoc: Path) -> set[Path]:
         raise EpubBuildError(f"Некорректный raw HTML в {path.name}: {error}") from error
     resources.update(inspector.resources)
     return resources
+
+
+def _pandoc_attributes(value: object) -> Iterable[list[list[str]]]:
+    """Find Pandoc Attr triples, including table cells and metadata nodes."""
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _pandoc_attributes(child)
+    elif isinstance(value, list):
+        if (len(value) == 3 and isinstance(value[0], str)
+                and isinstance(value[1], list) and all(isinstance(x, str) for x in value[1])
+                and isinstance(value[2], list)
+                and all(isinstance(x, list) and len(x) == 2
+                        and all(isinstance(part, str) for part in x) for x in value[2])):
+            yield value[2]
+        for child in value:
+            yield from _pandoc_attributes(child)
 
 
 def _pandoc_nodes(value: object) -> Iterable[dict[str, object]]:
@@ -490,7 +524,8 @@ class _RawHtmlInspector(HTMLParser):
     """Reject active/raw embedded content that Pandoc's Markdown AST omits."""
 
     _RESOURCE_TAGS = {"img", "audio", "video", "source", "object", "embed", "link", "image", "use"}
-    _BLOCKED_TAGS = {"script", "iframe"}
+    _BLOCKED_TAGS = {"script", "iframe", "object", "embed", "form", "input", "button", "meta",
+                     "animate", "animatemotion", "animatetransform", "animatecolor", "set", "discard"}
 
     def __init__(self, root: Path, source: Path) -> None:
         super().__init__(convert_charrefs=True)
@@ -502,7 +537,7 @@ class _RawHtmlInspector(HTMLParser):
         self._svg_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.lower()
+        tag = tag.lower().rsplit(":", 1)[-1]
         if tag in self._BLOCKED_TAGS:
             raise EpubBuildError(f"В {self.source.name} запрещён raw HTML-тег <{tag}>")
         if tag == "style":
@@ -510,12 +545,12 @@ class _RawHtmlInspector(HTMLParser):
         if tag == "svg":
             self._svg_depth += 1
         for name, value in attrs:
-            name = name.lower()
+            name = name.lower().rsplit(":", 1)[-1]
             if name.startswith("on"):
                 raise EpubBuildError(f"В {self.source.name} запрещён HTML-обработчик {name}")
             if value is None:
                 continue
-            if name == "style":
+            if name == "style" or name in _CSS_PRESENTATION_ATTRS:
                 _reject_css_text(value, self.source.name)
             elif name == "srcset":
                 for candidate in value.split(","):
@@ -525,7 +560,7 @@ class _RawHtmlInspector(HTMLParser):
             elif self._svg_depth and tag != "a" and name in {"src", "data", "href"}:
                 if not value.startswith("#"):
                     self.resources.update(_validate_local_resource(self.root, value, self.source))
-            elif tag in self._RESOURCE_TAGS and name in {"src", "data", "href"}:
+            elif name in {"src", "data", "poster", "background"} or (tag in self._RESOURCE_TAGS and name == "href"):
                 self.resources.update(_validate_local_resource(self.root, value, self.source))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -533,17 +568,24 @@ class _RawHtmlInspector(HTMLParser):
         self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "style" and self._style_depth:
+        tag = tag.lower().rsplit(":", 1)[-1]
+        if tag == "style" and self._style_depth:
             self._style_depth -= 1
             if not self._style_depth:
                 _reject_css_text("".join(self._style_chunks), self.source.name)
                 self._style_chunks.clear()
-        if tag.lower() == "svg" and self._svg_depth:
+        if tag == "svg" and self._svg_depth:
             self._svg_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self._style_depth:
             self._style_chunks.append(data)
+
+    def handle_pi(self, data: str) -> None:
+        raise EpubBuildError(f"В {self.source.name} запрещены processing instructions")
+
+    def handle_decl(self, decl: str) -> None:
+        raise EpubBuildError(f"В {self.source.name} запрещены XML/HTML-декларации")
 
 
 def _reject_unsafe_css(path: Path) -> None:
@@ -558,8 +600,16 @@ def _reject_unsafe_css(path: Path) -> None:
 
 
 def _reject_css_text(text: str, label: str) -> None:
+    # CSS escapes can spell resource identifiers (u\\72l, @\\69mport).
+    # Book styling does not need escaped identifiers, so reject them rather
+    # than relying on a partial CSS tokenizer.  Remove comments before checks.
+    if "\\" in text:
+        raise EpubBuildError(f"CSS EPUB не может содержать escape-последовательности: {label}")
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     if _CSS_IMPORT.search(text):
         raise EpubBuildError(f"CSS EPUB не может содержать @import: {label}")
+    if _CSS_RESOURCE_FUNCTION.search(text):
+        raise EpubBuildError(f"CSS EPUB не может содержать функции отдельных ресурсов: {label}")
     for _, resource in _CSS_URL.findall(text):
         if resource.strip() and not resource.strip().startswith("#"):
             raise EpubBuildError(
@@ -585,16 +635,30 @@ def _validate_local_resource(root: Path, resource: str, source: Path) -> set[Pat
 
 def _validate_svg(path: Path) -> None:
     """SVG is XML, so reject active content and non-local dependencies early."""
-    root = _parse_xml(path.read_bytes(), path.name)
+    data = path.read_bytes()
+    # Default ElementTree silently discards PIs and DTDs.  A parser target
+    # rejects them in every supported XML encoding, including UTF-16.
+    class StaticSvgBuilder(ET.TreeBuilder):
+        def doctype(self, name: str, pubid: str | None, system: str | None) -> None:
+            raise EpubBuildError(f"SVG не может содержать DTD: {path.name}")
+
+        def pi(self, target: str, text: str | None = None) -> None:
+            raise EpubBuildError(f"SVG не может содержать processing instructions: {path.name}")
+
+    try:
+        root = ET.fromstring(data, parser=ET.XMLParser(target=StaticSvgBuilder()))
+    except ET.ParseError as error:
+        raise EpubBuildError(f"Некорректный XML/XHTML в {path.name}: {error}") from error
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1].lower()
-        if tag in {"script", "foreignobject"}:
+        if tag in {"script", "foreignobject", "animate", "animatemotion", "animatetransform",
+                   "animatecolor", "set", "discard"}:
             raise EpubBuildError(f"В SVG запрещён тег <{tag}>: {path.name}")
         for attr, value in element.attrib.items():
             local = attr.rsplit("}", 1)[-1].lower()
             if local.startswith("on"):
                 raise EpubBuildError(f"В SVG запрещён обработчик {local}: {path.name}")
-            if local == "style":
+            if local == "style" or local in _CSS_PRESENTATION_ATTRS:
                 _reject_css_text(value, path.name)
             elif local in {"href", "src", "data"} and value and not value.startswith("#"):
                 raise EpubBuildError(f"SVG не может подключать отдельный ресурс: {path.name}")

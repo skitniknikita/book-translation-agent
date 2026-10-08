@@ -165,6 +165,107 @@ class BookWorkflowTests(unittest.TestCase):
             workflow.Book.initialize(self.root, self.source, self.blocks(), self.selection())
         self.assertEqual(book.state["source"]["sha256"], sha256(self.source_bytes))
 
+    def test_init_rejects_symlinked_work_before_creating_any_outside_file(self):
+        outside = Path(self.temp.name) / "outside-init"
+        outside.mkdir()
+        (self.root / "work").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Символические ссылки"):
+            self.create()
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.source.read_bytes(), self.source_bytes)
+
+    def test_packet_rejects_symlinked_directory_without_overwriting_outside_file(self):
+        book = self.create()
+        book.plan()
+        outside = Path(self.temp.name) / "outside-packets"
+        outside.mkdir()
+        victim = outside / "part-0001-scout.json"
+        victim.write_bytes(b"Synthetic outside file; preserve me.")
+        before = victim.read_bytes()
+        (self.root / "work/packets").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "Символические ссылки"):
+            book.packet("part-0001", "scout")
+        self.assertEqual(victim.read_bytes(), before)
+        self.assertEqual(list(outside.iterdir()), [victim])
+
+    def test_glossary_symlink_cannot_read_outside_data_into_worker_packet(self):
+        book = self.create()
+        outside = Path(self.temp.name) / "outside-glossary.txt"
+        outside.write_bytes(b"Synthetic private marker.")
+        glossary = self.root / "00_Глоссарий.md"
+        glossary.symlink_to(outside)
+        proof = self.write("work/evidence/glossary.txt")
+        with self.assertRaisesRegex(ValueError, "Символические ссылки"):
+            book.approve_glossary(self.terms(), [b["id"] for b in book.blocks], proof)
+        self.assertIsNone(book.state["glossary"])
+        self.assertFalse((self.root / "work/terms.json").exists())
+        glossary.unlink()
+        self.approve_glossary(book)
+        book.plan()
+        glossary.unlink()
+        glossary.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "Символические ссылки"):
+            book.packet("part-0001", "draft")
+        self.assertFalse((self.root / "work/packets/part-0001-draft.json").exists())
+        self.assertEqual(outside.read_bytes(), b"Synthetic private marker.")
+
+    def test_stored_chunk_traversal_rejected_at_load_and_before_writes(self):
+        book = self.create()
+        book.plan()
+        victim = Path(self.temp.name) / "outside-traversal-scout.json"
+        victim.write_bytes(b"Synthetic outside file; preserve me.")
+        book.state["chunks"][0]["id"] = "../../../outside-traversal"
+        # A restored or externally edited journal is untrusted too.
+        book.path.write_text(json.dumps(book.state), encoding="utf-8")
+        state_before = book.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "ID фрагмента"):
+            workflow.Book(self.root)
+        with self.assertRaisesRegex(ValueError, "ID фрагмента"):
+            book.packet("../../../outside-traversal", "scout")
+        with self.assertRaisesRegex(ValueError, "ID фрагмента"):
+            book.save()
+        self.assertEqual(book.path.read_bytes(), state_before)
+        self.assertEqual(victim.read_bytes(), b"Synthetic outside file; preserve me.")
+        self.assertFalse((self.root / "work/packets").exists())
+
+    def test_managed_files_reject_late_symlink_replacement_and_dangling_links(self):
+        book = self.create()
+        outside = Path(self.temp.name) / "outside-managed.json"
+        outside.write_text('{"synthetic": true}', encoding="utf-8")
+        for relative, operation in (
+            ("work/model-selection.json", book.models),
+            ("work/usage.jsonl", lambda: book.usage({"task_id": "synthetic", "scope": "task_delta"})),
+            ("work/state.json", book.save),
+        ):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                original = path.read_bytes() if path.exists() else None
+                if path.exists():
+                    path.unlink()
+                path.symlink_to(outside)
+                with self.assertRaisesRegex(ValueError, "Символические ссылки"):
+                    operation()
+                self.assertEqual(outside.read_text(), '{"synthetic": true}')
+                path.unlink()
+                if original is not None:
+                    path.write_bytes(original)
+        dangling = self.root / "work/packets"
+        missing = Path(self.temp.name) / "must-not-be-created"
+        dangling.symlink_to(missing, target_is_directory=True)
+        book.plan()
+        with self.assertRaisesRegex(ValueError, "Символические ссылки"):
+            book.packet("part-0001", "scout")
+        self.assertFalse(missing.exists())
+
+    def test_user_selected_symlink_to_book_root_remains_supported(self):
+        linked_root = Path(self.temp.name) / "linked-root"
+        linked_root.symlink_to(self.root, target_is_directory=True)
+        book = workflow.Book.initialize(linked_root, self.source, self.blocks(), self.selection())
+        book.plan()
+        packet = book.packet("part-0001", "scout")
+        self.assertTrue(Path(packet["path"]).is_relative_to(self.root.resolve()))
+        self.assertEqual(workflow.Book(linked_root).root, self.root.resolve())
+
     def test_model_selection_file_cannot_be_silently_rebound_after_init(self):
         book = self.create()
         self.approve_glossary(book)
