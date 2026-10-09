@@ -9,6 +9,8 @@ Before the first full cycle, read the [translation protocol](references/translat
 It defines requirements for meaning, Russian prose, sources, and completeness.
 Preserve the user’s decisions about language, edition, and terminology. A request
 for a glossary alone does not authorize translating the entire book.
+Reply in the language the user uses unless they request another; this is separate
+from the book's target language, which this workflow defaults to Russian.
 
 ## 1. Models and source
 

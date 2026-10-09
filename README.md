@@ -4,7 +4,7 @@ English | [Русский](README.ru.md)
 
 A research-first book translation workflow for Codex. A capable lead model researches terminology and checks every passage against the original. Smaller models draft and copyedit; Python scripts preserve progress and assemble the EPUB.
 
-Designed for philosophy and humanities books, with **Russian as the default translation language**. Project documentation and agent instructions are in English. Russian terminology examples, output filenames, and some script messages are retained. This is an independent project, not an official OpenAI product.
+Designed for philosophy and humanities books. The agent replies in the language you use unless you request another. This does not change the book's target language: the current workflow defaults to **Russian for book translations**. Translation into other target languages has not been validated. The main documentation and agent instructions are in English; Russian terminology examples, output filenames, and some script messages are retained. This is an independent project, not an official OpenAI product.
 
 **Status:** early release. Local tests cover workflow bookkeeping and EPUB assembly. Full-book savings, translation quality across model combinations, and end-to-end operation on other machines have not been benchmarked.
 
