@@ -134,6 +134,7 @@ def build_epub(
             document = json.loads(rendered)
         except json.JSONDecodeError as error:
             raise EpubBuildError("Pandoc вернул некорректный AST книги") from error
+        _portable_heading_ids(document)
         resources.update(_preflight_document(root, document, root / "book.md"))
         checked_document.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         _run_pandoc(
@@ -424,6 +425,71 @@ def _publication_labels(values: dict[str, object]) -> dict[str, str]:
     if missing:
         raise EpubBuildError("Для этого языка укажите подписи в metadata: " + ", ".join(missing))
     return labels
+
+
+def _portable_heading_ids(document: dict[str, object]) -> None:
+    """Keep generated EPUB navigation links portable across Pandoc versions."""
+    def walk(value):
+        if isinstance(value, dict):
+            yield value
+            for item in value.values():
+                yield from walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from walk(item)
+
+    def identifiers(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from identifiers(item)
+        elif isinstance(value, list):
+            if (len(value) == 3 and isinstance(value[0], str)
+                    and isinstance(value[1], list) and isinstance(value[2], list)):
+                yield value[0]
+            for item in value:
+                yield from identifiers(item)
+
+    # Pandoc 3.1.3 can emit a broken TOC path for accented heading IDs.
+    # Stable workflow block IDs remain untouched; only non-ASCII heading IDs
+    # generated or supplied in Markdown are replaced in the EPUB AST.
+    used = set(identifiers(document))
+    replacements = {}
+    serial = 1
+    for node in walk(document):
+        if node.get("t") != "Header":
+            continue
+        content = node.get("c")
+        if not isinstance(content, list) or len(content) < 2:
+            continue
+        attr = content[1]
+        if not isinstance(attr, list) or not attr or not isinstance(attr[0], str):
+            continue
+        old = attr[0]
+        if not old or old.isascii():
+            continue
+        candidate = f"epub-heading-{serial}"
+        while candidate in used:
+            serial += 1
+            candidate = f"epub-heading-{serial}"
+        serial += 1
+        used.add(candidate)
+        attr[0] = candidate
+        replacements[old] = candidate
+    if not replacements:
+        return
+    for node in walk(document):
+        if node.get("t") != "Link":
+            continue
+        content = node.get("c")
+        if not isinstance(content, list) or not content or not isinstance(content[-1], list):
+            continue
+        target = content[-1]
+        if not target or not isinstance(target[0], str):
+            continue
+        split = urlsplit(target[0])
+        old = unquote(split.fragment)
+        if not split.scheme and not split.netloc and old in replacements:
+            target[0] = target[0].split("#", 1)[0] + "#" + replacements[old]
 
 
 def _combined_markdown(glossary: Path, translation: Path, values: dict[str, object]) -> str:

@@ -116,6 +116,17 @@ class EpubBuilderTests(unittest.TestCase):
                                     self.metadata, self.output, expected_language="de")
         self.assertEqual(self.output.read_bytes(), previous)
 
+    def test_accented_heading_id_and_internal_link_are_portable(self):
+        document = {"blocks": [
+            {"t": "Header", "c": [1, ["première-partie", [], []], [{"t": "Str", "c": "Première"}]]},
+            {"t": "Para", "c": [{"t": "Link", "c": [["", [], []],
+                [{"t": "Str", "c": "Voir"}], ["#première-partie", ""]]}]},
+        ]}
+        epub_builder._portable_heading_ids(document)
+        heading_id = document["blocks"][0]["c"][1][0]
+        self.assertTrue(heading_id.isascii())
+        self.assertEqual(document["blocks"][1]["c"][0]["c"][2][0], "#" + heading_id)
+
     def test_missing_local_asset_preserves_previous_epub(self):
         self.translation.write_text("![Нет файла](assets/missing.png)", encoding="utf-8")
         self.output.write_bytes(b"previous-good-epub")
