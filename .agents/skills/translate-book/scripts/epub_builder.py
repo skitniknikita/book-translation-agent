@@ -134,7 +134,6 @@ def build_epub(
             document = json.loads(rendered)
         except json.JSONDecodeError as error:
             raise EpubBuildError("Pandoc вернул некорректный AST книги") from error
-        _portable_heading_ids(document)
         resources.update(_preflight_document(root, document, root / "book.md"))
         checked_document.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         _run_pandoc(
@@ -154,6 +153,7 @@ def build_epub(
             + (["--css", str(css_path)] if css_path is not None else []),
             cwd=root,
         )
+        _repair_directory_toc_links(candidate)
         source_plain = _pandoc_plain(pandoc, checked_document, cwd=root, input_format="json")
         report = validate_epub(
             candidate,
@@ -427,69 +427,88 @@ def _publication_labels(values: dict[str, object]) -> dict[str, str]:
     return labels
 
 
-def _portable_heading_ids(document: dict[str, object]) -> None:
-    """Keep generated EPUB navigation links portable across Pandoc versions."""
-    def walk(value):
-        if isinstance(value, dict):
-            yield value
-            for item in value.values():
-                yield from walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                yield from walk(item)
+def _repair_directory_toc_links(epub: Path) -> None:
+    """Repair Pandoc TOC links that name a text directory but no XHTML file.
 
-    def identifiers(value):
-        if isinstance(value, dict):
-            for item in value.values():
-                yield from identifiers(item)
-        elif isinstance(value, list):
-            if (len(value) == 3 and isinstance(value[0], str)
-                    and isinstance(value[1], list) and isinstance(value[2], list)):
-                yield value[0]
-            for item in value:
-                yield from identifiers(item)
+    Some Pandoc versions emit `text/#fragment` for a heading in a one-chapter
+    book, in XHTML navigation or NCX. Resolve only unambiguous fragments inside
+    that directory; all other broken links remain failures in the validator.
+    """
+    with zipfile.ZipFile(epub) as archive:
+        members = archive.namelist()
+        container = _parse_xml(archive.read(CONTAINER_PATH), CONTAINER_PATH)
+        rootfile = container.find(f".//{{{CONTAINER_NS}}}rootfile")
+        if rootfile is None or not rootfile.get("full-path"):
+            return
+        opf_path = _normal_zip_path(rootfile.get("full-path", ""))
+        manifest, _ = _parse_opf(_parse_xml(archive.read(opf_path), opf_path), opf_path, members)
+        xhtml = [item["path"] for item in manifest.values()
+                 if item["media_type"] == "application/xhtml+xml"]
+        toc_paths = [item["path"] for item in manifest.values()
+                     if "nav" in item["properties"].split()
+                     or item["media_type"] == "application/x-dtbncx+xml"]
+        if not toc_paths:
+            return
+        toc_documents = {path: _parse_xml(archive.read(path), path) for path in toc_paths}
 
-    # Pandoc 3.1.3 can emit a broken TOC path for accented heading IDs.
-    # Stable workflow block IDs remain untouched; only non-ASCII heading IDs
-    # generated or supplied in Markdown are replaced in the EPUB AST.
-    used = set(identifiers(document))
-    replacements = {}
-    serial = 1
-    for node in walk(document):
-        if node.get("t") != "Header":
-            continue
-        content = node.get("c")
-        if not isinstance(content, list) or len(content) < 2:
-            continue
-        attr = content[1]
-        if not isinstance(attr, list) or not attr or not isinstance(attr[0], str):
-            continue
-        old = attr[0]
-        if not old or old.isascii():
-            continue
-        candidate = f"epub-heading-{serial}"
-        while candidate in used:
-            serial += 1
-            candidate = f"epub-heading-{serial}"
-        serial += 1
-        used.add(candidate)
-        attr[0] = candidate
-        replacements[old] = candidate
-    if not replacements:
-        return
-    for node in walk(document):
-        if node.get("t") != "Link":
-            continue
-        content = node.get("c")
-        if not isinstance(content, list) or not content or not isinstance(content[-1], list):
-            continue
-        target = content[-1]
-        if not target or not isinstance(target[0], str):
-            continue
-        split = urlsplit(target[0])
-        old = unquote(split.fragment)
-        if not split.scheme and not split.netloc and old in replacements:
-            target[0] = target[0].split("#", 1)[0] + "#" + replacements[old]
+        def link_attribute(element):
+            tag = element.tag.rsplit("}", 1)[-1].lower()
+            return "href" if tag == "a" else "src" if tag == "content" else None
+
+        directory_link = False
+        for document in toc_documents.values():
+            for element in document.iter():
+                attr = link_attribute(element)
+                href = element.get(attr) if attr else None
+                if href:
+                    split = urlsplit(href)
+                    if (split.fragment and not (split.scheme or split.netloc or split.query)
+                            and unquote(split.path).endswith("/")):
+                        directory_link = True
+                        break
+            if directory_link:
+                break
+        if not directory_link:
+            return
+        ids = {}
+        for path in xhtml:
+            document = _parse_xml(archive.read(path), path)
+            ids[path] = {element.get("id") or element.get(f"{{{XML_NS}}}id")
+                         for element in document.iter()}
+        changed = {}
+        for path, document in toc_documents.items():
+            repaired = False
+            for element in document.iter():
+                attr = link_attribute(element)
+                href = element.get(attr) if attr else None
+                if not href:
+                    continue
+                split = urlsplit(href)
+                if (split.scheme or split.netloc or split.query or not split.fragment
+                        or not unquote(split.path).endswith("/")):
+                    continue
+                directory = _resolve_internal_path(str(PurePosixPath(path).parent), unquote(split.path))
+                fragment = unquote(split.fragment)
+                targets = [item for item in xhtml
+                           if item.startswith(directory + "/") and fragment in ids[item]]
+                if len(targets) != 1:
+                    continue
+                relative = posixpath.relpath(targets[0], str(PurePosixPath(path).parent))
+                element.set(attr, relative + "#" + split.fragment)
+                repaired = True
+            if repaired:
+                changed[path] = ET.tostring(document, encoding="utf-8", xml_declaration=True)
+        if not changed:
+            return
+        repaired_epub = epub.with_suffix(".repaired.epub")
+        try:
+            with zipfile.ZipFile(repaired_epub, "w") as output:
+                for item in archive.infolist():
+                    output.writestr(item, changed.get(item.filename, archive.read(item.filename)))
+        except BaseException:
+            repaired_epub.unlink(missing_ok=True)
+            raise
+    os.replace(repaired_epub, epub)
 
 
 def _combined_markdown(glossary: Path, translation: Path, values: dict[str, object]) -> str:
@@ -904,12 +923,12 @@ def _validate_links(
                 if path_part:
                     target = _resolve_internal_path(str(PurePosixPath(document_path).parent), path_part)
                     if target not in available:
-                        raise EpubBuildError(f"Внутренняя ссылка ведёт вне manifest: {value}")
+                        raise EpubBuildError(f"Внутренняя ссылка ведёт вне manifest в {document_path}: {value}")
                 else:
                     target = document_path
                 if split.fragment:
                     if unquote(split.fragment) not in ids_by_document.get(target, set()):
-                        raise EpubBuildError(f"Внутренняя ссылка ведёт к отсутствующему ID: {value}")
+                        raise EpubBuildError(f"Внутренняя ссылка ведёт к отсутствующему ID в {document_path}: {value}")
 
 
 def _resolve_internal_path(parent: str, href: str) -> str:

@@ -116,16 +116,35 @@ class EpubBuilderTests(unittest.TestCase):
                                     self.metadata, self.output, expected_language="de")
         self.assertEqual(self.output.read_bytes(), previous)
 
-    def test_accented_heading_id_and_internal_link_are_portable(self):
-        document = {"blocks": [
-            {"t": "Header", "c": [1, ["première-partie", [], []], [{"t": "Str", "c": "Première"}]]},
-            {"t": "Para", "c": [{"t": "Link", "c": [["", [], []],
-                [{"t": "Str", "c": "Voir"}], ["#première-partie", ""]]}]},
-        ]}
-        epub_builder._portable_heading_ids(document)
-        heading_id = document["blocks"][0]["c"][1][0]
-        self.assertTrue(heading_id.isascii())
-        self.assertEqual(document["blocks"][1]["c"][0]["c"][2][0], "#" + heading_id)
+    def test_repairs_pandoc_directory_only_toc_link(self):
+        candidate = self.book / "broken-nav.epub"
+        container = (b'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                     b'<rootfiles><rootfile full-path="EPUB/content.opf"/>'
+                     b'</rootfiles></container>')
+        opf = (b'<package xmlns="http://www.idpf.org/2007/opf"><manifest>'
+               b'<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+               b'<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+               b'<item id="body" href="text/chapter.xhtml" media-type="application/xhtml+xml"/>'
+               b'</manifest><spine><itemref idref="body"/></spine></package>')
+        nav = (b'<html xmlns="http://www.w3.org/1999/xhtml"><body><nav>'
+               b'<a href="text/#chapter">Chapter</a></nav></body></html>')
+        ncx = (b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>'
+               b'<navPoint><content src="text/#chapter"/></navPoint></navMap></ncx>')
+        body = (b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                b'<h1 id="chapter">Chapter</h1></body></html>')
+        with zipfile.ZipFile(candidate, "w") as archive:
+            archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            archive.writestr("META-INF/container.xml", container)
+            archive.writestr("EPUB/content.opf", opf)
+            archive.writestr("EPUB/nav.xhtml", nav)
+            archive.writestr("EPUB/toc.ncx", ncx)
+            archive.writestr("EPUB/text/chapter.xhtml", body)
+        epub_builder._repair_directory_toc_links(candidate)
+        with zipfile.ZipFile(candidate) as archive:
+            self.assertIn(b'text/chapter.xhtml#chapter', archive.read("EPUB/nav.xhtml"))
+            self.assertIn(b'text/chapter.xhtml#chapter', archive.read("EPUB/toc.ncx"))
+            self.assertEqual(archive.infolist()[0].filename, "mimetype")
+            self.assertEqual(archive.infolist()[0].compress_type, zipfile.ZIP_STORED)
 
     def test_missing_local_asset_preserves_previous_epub(self):
         self.translation.write_text("![Нет файла](assets/missing.png)", encoding="utf-8")
