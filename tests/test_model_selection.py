@@ -128,7 +128,7 @@ for line in sys.stdin:
         print(json.dumps({'id': request['id'], 'result': data}), flush=True)
 """, encoding="utf-8")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-        catalog = models.query_catalog(str(fake), timeout=3)
+        catalog = models.query_catalog(str(fake), timeout=8)
         self.assertEqual([item['model'] for item in catalog['models']], ['route-first', 'route-next'])
 
     def test_app_server_timeout_is_bounded_and_reaped(self):

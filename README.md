@@ -119,7 +119,7 @@ python3 tools/release.py --check
 
 Tests run without model calls, credentials, or a Codex installation. They check completeness, stale reviews, selection validation, edits, local resource handling, and real EPUB conversion and reverse reading through Pandoc. Synthetic review records test mechanics; they do not establish translation quality.
 
-[GitHub Actions](.github/workflows/checks.yml) runs checks on Ubuntu with Python 3.11 and 3.12 after publication. It does not translate books, publish releases, or use model API keys. This workflow has not been run on GitHub yet.
+[GitHub Actions](.github/workflows/checks.yml) runs checks on Ubuntu with Python 3.11 and 3.12. It does not translate books, publish releases, or use model API keys. Check the repository's Actions tab for the current run status.
 
 | Location | Purpose |
 | --- | --- |

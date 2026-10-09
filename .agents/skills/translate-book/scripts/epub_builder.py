@@ -133,7 +133,7 @@ def build_epub(
                 "--to=epub3",
                 "--standalone",
                 "--toc",
-                "--epub-title-page",
+                "--epub-title-page=true",
                 "--resource-path",
                 str(root),
                 "--output",
