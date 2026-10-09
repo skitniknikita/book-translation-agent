@@ -1,16 +1,18 @@
 ---
 name: translate-book
-description: "Translate a book or long humanities text into Russian: research a glossary, choose available models, delegate drafts to smaller workers, verify meaning with a large model, and build an EPUB. Continue an existing translation from its saved state."
+description: "Translate a book or long humanities text into the requested language: research a glossary, choose available models, delegate drafts to smaller workers, verify meaning with a large model, and build an EPUB. Continue an existing translation from its saved state."
 ---
 
 # Translate a Book
 
 Before the first full cycle, read the [translation protocol](references/translation-protocol.md).
-It defines requirements for meaning, Russian prose, sources, and completeness.
+It defines requirements for meaning, target-language prose, sources, and completeness.
 Preserve the user’s decisions about language, edition, and terminology. A request
 for a glossary alone does not authorize translating the entire book.
-Reply in the language the user uses unless they request another; this is separate
-from the book's target language, which this workflow defaults to Russian.
+Reply in the language the user uses unless they request another. Translate the
+book into the target language they request, or Russian if they do not specify one.
+Record that target in the book state and every worker assignment. Do not infer a
+book target from the chat language or change an existing book's target on resume.
 
 ## 1. Models and source
 
@@ -52,9 +54,10 @@ books with a different state format: continue them under the existing
 Assign scouts non-overlapping ranges of the full text, including notes. From their
 findings, compile a complete list of concepts, oppositions, polysemy, names, and
 quotations. Check coverage of every ID. Read difficult passages and evidence
-yourself.
+yourself. Search for terminology evidence in the chosen target language.
 
-First use previous glossaries and the author's term base, then **always perform
+First use previous glossaries and the author's term base for the **same target
+language**, then **always perform
 web verification** of key and disputed decisions. Priority: the author's published
 translations → official publishers and authorized excerpts → translations of
 cited thinkers → academic journals, universities, and libraries.
@@ -110,7 +113,7 @@ This order has no proven advantage for every author. In the first chapter, compa
 quality and the volume of repeat edits; if quality worsens, keep `meaning-first`
 and all three passes. Do not claim an acceleration percentage in advance.
 Any later edit requires a new check of the affected passage. After a semantic or
-terminological edit, reread the Russian and compare the changed text with the
+terminological edit, reread the target-language prose and compare it with the
 original again. The program does not accept old marks for a new version.
 
 Record checks with the exact task version, every ID, the actual model, evidence of

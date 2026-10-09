@@ -2,15 +2,15 @@
 
 ## Objective
 
-Translate philosophical and humanities texts from the language of the supplied original into natural Russian, preserving the original's argument, terminology, and structure. The result must be suitable for reading and EPUB publication, rather than remaining a literal crib.
+Translate philosophical and humanities texts from the language of the supplied original into the target language requested by the user, preserving the original's argument, terminology, and structure. If no target is specified, use Russian. Record the target for the book before translation; the language of the conversation alone does not choose it. The result must be suitable for reading and EPUB publication, rather than remaining a literal crib.
 
 The user need not understand formats or publishing tools. Make technical decisions independently provided they do not change the book's content.
 
 ### Priorities
 
 1. Meaning and the original's logical distinctions.
-2. Terminological consistency with the Russian tradition.
-3. Natural Russian syntax and style.
+2. Terminological consistency with the target language's published tradition.
+3. Natural syntax and style in the target language.
 4. Complete structure: paragraphs, quotations, footnotes, captions, and bibliography.
 5. Functional final files.
 
@@ -37,7 +37,7 @@ The full cycle is complete only when:
 | 2. Term extraction | A complete list of difficult concepts | The entire text has been reviewed |
 | 3. Research | `00_Глоссарий.md` | A decision is made or flagged for key terms |
 | 4. Translation | `01_Перевод.md` | All semantic blocks are translated |
-| 5. Editing | Checked Russian text | Three editorial passes are complete |
+| 5. Editing | Checked target-language text | Three editorial passes are complete |
 | 6. Publication | `Автор — Название.epub` | The EPUB is structurally and substantively checked |
 
 Do not begin the main translation until a working glossary exists.
@@ -48,7 +48,7 @@ Do not begin the main translation until a working glossary exists.
 
 For a new work, determine:
 
-- author, title, language, and edition;
+- author, title, source language, target language, and edition;
 - the extent and boundaries of the authorial text;
 - headings and internal structure;
 - footnotes, notes, quotations, and bibliography;
@@ -94,7 +94,7 @@ Read the entire work and list:
 - multiword formulas;
 - ordinary words with specialized meanings;
 - words whose meaning changes within the text;
-- terms with competing Russian renderings;
+- terms with competing renderings in the target language;
 - names, titles of works, theories, and thought experiments;
 - repetitions and wordplay that carry the argument.
 
@@ -102,18 +102,18 @@ Do not add ordinary vocabulary without conceptual weight. The glossary must be e
 
 If a term changes meaning, create separate context-specific decisions. Do not impose a single equivalent on an author's polysemy.
 
-### Where to Verify a Russian Rendering
+### Where to Verify a Target-Language Rendering
 
 Use sources in this order:
 
-1. Published Russian translations of the same author.
+1. Published translations of the same author into the target language.
 2. Official publishers and lawful book excerpts.
-3. Russian translations of thinkers cited by the author.
-4. Academic journals, universities, and scholarly databases.
-5. Professional translations of essays, interviews, and lectures.
+3. Target-language translations of thinkers cited by the author.
+4. Academic journals, universities, and scholarly databases in the target language.
+5. Professional translations of essays, interviews, and lectures into the target language.
 6. Independent articles, only as supplementary evidence.
 
-First check the glossaries of already translated works by the same author in this folder. Retain an earlier decision unless the new context requires a departure.
+First check glossaries of already translated works by the same author into the **same target language**. Do not reuse a rendering from a glossary for another target language. Retain an earlier decision unless the new context requires a departure.
 
 A completed translation of the same text may be used to compare terminology, but translate the original supplied by the user independently.
 
@@ -124,7 +124,7 @@ For each web source, preserve the direct link, title, and access date. Several i
 Give every rendering a status:
 
 - **Fixed** — published for this author or in a canonical translation of a cited thinker.
-- **Conventional** — accepted in the Russian-language discipline.
+- **Conventional** — accepted in the target-language discipline.
 - **Working** — proposed for this text and requiring justification.
 
 Also state confidence: high, medium, or low.
@@ -150,34 +150,34 @@ If the full cycle was requested, continue automatically after saving the glossar
 
 ## 3. Translation
 
-### Accuracy and Russian
+### Accuracy and Target-Language Prose
 
 - Preserve claims, qualifications, negations, modality, and logical transitions.
-- Recast the original sentence according to Russian syntax.
+- Recast the original sentence according to the target language's syntax.
 - Do not replace a difficult concept with a familiar word when that loses a distinction.
 - Do not remove conceptually meaningful repetition for stylistic variety.
 - Do not insert explanations into the author's voice: use a footnote or note.
-- Do not mechanically unify `technology`, `technics`, and `technical`; distinguish «технику», «технологию», «техническое», and «технологическое» from context.
+- Do not mechanically unify `technology`, `technics`, and `technical`; preserve the distinctions that matter in context. In Russian, for example, «техника», «технология», «техническое», and «технологическое» may require different choices.
 
 ### Ambiguous Terms
 
-- Use a canonical Russian term without a duplicate in the original language.
-- If Russian erases a significant distinction, add a short clarification at first use: `исчисление [расчёт]`.
+- Use a canonical target-language term without routinely duplicating the original.
+- If the target language erases a significant distinction, add a short clarification at first use. For Russian, one possible form is `исчисление [расчёт]`.
 - Do not put stylistic synonyms in parentheses. Parentheses are for semantic ambiguity only and normally appear once.
 - If a term's translation changes by context, describe this in advance in the glossary.
 
 ### Quotations and Titles
 
-- Use the published Russian title of a work when one is established.
-- For a quotation from an existing Russian edition, use the published translation where possible and cite its source.
-- Do not present your own translation of a quotation as the text of a Russian edition.
-- When the Russian form of a rare name or term is unstable, retain the original at its first occurrence.
+- Use the published target-language title of a work when one is established.
+- For a quotation from an existing target-language edition, use the published translation where possible and cite its source.
+- Do not present your own translation of a quotation as the text of a published edition.
+- When the target-language form of a rare name or term is unstable, retain the original at its first occurrence.
 
 ### Original Structure
 
 Preserve the order and boundaries of headings, paragraphs, lists, quotations, footnotes, tables, formulas, captions, and information about the author and source.
 
-You may split or combine a paragraph only for natural Russian syntax, provided the composition of the argument remains unchanged.
+You may split or combine a paragraph only for natural target-language syntax, provided the composition of the argument remains unchanged.
 
 ---
 
@@ -191,18 +191,18 @@ Check every semantic block, omissions and additions, negations, degree of catego
 
 Compare counts of semantic blocks, lists, captions, and notes. Counters help detect an omission but do not replace manual comparison.
 
-### B. Editing the Russian Text
+### B. Editing the Target-Language Text
 
-Remove calqued word order, superfluous pronouns and passives, incorrect government, accidental repetitions, bureaucratic language alien to the author, and overloaded constructions created by the original's syntax.
+Remove calqued word order, grammatical errors, accidental repetitions, register shifts alien to the author, and overloaded constructions created by the original's syntax. Apply the norms of the target language, rather than Russian-specific rules to every book.
 
-After revisions, reread the text as an independent Russian work without looking at the original.
+After revisions, reread the text as an independent work in the target language without looking at the original.
 
 ### C. Terminology Check
 
 - Search the translation for terms from the glossary.
 - Find undesirable competing renderings.
 - Explain every deliberate departure from the glossary.
-- Compare the text with earlier translations of the same author.
+- Compare terminology with earlier translations of the same author into the same target language.
 - When a decision changes, update the glossary, every occurrence, notes, and the EPUB.
 
 ---

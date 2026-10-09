@@ -38,6 +38,12 @@ _CSS_URL = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE | re.DOTALL
 _CSS_RESOURCE_FUNCTION = re.compile(r"\b(?:-webkit-)?(?:image-set|image|src)\s*\(", re.IGNORECASE)
 _CSS_PRESENTATION_ATTRS = {"fill", "stroke", "filter", "clip-path", "mask", "cursor",
                            "marker", "marker-start", "marker-mid", "marker-end"}
+LABEL_KEYS = ("glossary_title", "publication_title", "source_label", "rights_label",
+              "translation_status_label")
+DEFAULT_LABELS = {
+    "ru": ("Глоссарий", "Сведения об издании", "Источник оригинала", "Права", "Статус перевода"),
+    "en": ("Glossary", "Publication information", "Original source", "Rights", "Translation status"),
+}
 
 
 class EpubBuildError(ValueError):
@@ -53,6 +59,7 @@ def build_epub(
     css: Path | None = None,
     *,
     expected_ids: Sequence[str] = (),
+    expected_language: str | None = None,
 ) -> dict:
     """Build and validate an EPUB, atomically replacing ``output`` on success.
 
@@ -95,6 +102,9 @@ def build_epub(
     missing = [key for key in required if not metadata_values.get(key)]
     if missing:
         raise EpubBuildError("В метаданных не заполнены: " + ", ".join(missing))
+    if expected_language is not None and metadata_values["language"].lower() != expected_language.lower():
+        raise EpubBuildError("Язык EPUB не совпадает с языком перевода книги")
+    _publication_labels(metadata_values)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".epub-build-", dir=root) as temporary:
@@ -353,6 +363,7 @@ def _metadata_values(metadata: Path) -> dict[str, object]:
         "rights": first("rights"),
         "source": first("source", "original_source"),
         "unofficial_note": first("unofficial_note", "unofficial-note", "translation_note"),
+        **{key: first(key) for key in LABEL_KEYS},
     }
 
 
@@ -405,21 +416,32 @@ def _canonical_metadata(values: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _publication_labels(values: dict[str, object]) -> dict[str, str]:
+    language = str(values["language"]).split("-", 1)[0].lower()
+    defaults = dict(zip(LABEL_KEYS, DEFAULT_LABELS.get(language, ())))
+    labels = {key: str(values.get(key) or defaults.get(key, "")) for key in LABEL_KEYS}
+    missing = [key for key, value in labels.items() if not value.strip()]
+    if missing:
+        raise EpubBuildError("Для этого языка укажите подписи в metadata: " + ", ".join(missing))
+    return labels
+
+
 def _combined_markdown(glossary: Path, translation: Path, values: dict[str, object]) -> str:
     glossary_text = glossary.read_text(encoding="utf-8")
     translation_text = translation.read_text(encoding="utf-8")
+    labels = {key: _html_text(value) for key, value in _publication_labels(values).items()}
     source = _html_text(str(values["source"]))
     rights = _html_text(str(values["rights"]))
     note = _html_text(str(values["unofficial_note"]))
     return (
-        "# Глоссарий {#glossary}\n\n"
+        f"# <span>{labels['glossary_title']}</span> {{#glossary}}\n\n"
         + glossary_text.strip()
         + "\n\n"
         + translation_text.strip()
-        + "\n\n# Сведения об издании {#publication-information}\n\n"
-        + f"**Источник оригинала:** <span>{source}</span>  \n"
-        + f"**Права:** <span>{rights}</span>  \n"
-        + f"**Статус перевода:** <span>{note}</span>\n"
+        + f"\n\n# <span>{labels['publication_title']}</span> {{#publication-information}}\n\n"
+        + f"<strong>{labels['source_label']}:</strong> <span>{source}</span>  \n"
+        + f"<strong>{labels['rights_label']}:</strong> <span>{rights}</span>  \n"
+        + f"<strong>{labels['translation_status_label']}:</strong> <span>{note}</span>\n"
     )
 
 

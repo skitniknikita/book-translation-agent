@@ -11,10 +11,12 @@ The agent runs the commands. The user needs only the source and an ordinary requ
 5. Run the following (paths in the examples are relative to the current directory; pass actual paths exactly):
 
 ```sh
-python3 .agents/skills/translate-book/scripts/book_workflow.py --book-dir "Новая книга" init --source "original.epub" --blocks "source-blocks.json" --selection "model-selection.json"
+python3 .agents/skills/translate-book/scripts/book_workflow.py --book-dir "Новая книга" init --source "original.epub" --blocks "source-blocks.json" --selection "model-selection.json" --target-language fr
 ```
 
 `init` copies the original to `work/source-original.ext`; it does not modify the source file. It does not overwrite an existing or nonempty working folder. The schema 2 program does not migrate an older `state.json`: an existing translation continues under the earlier protocol, or a separate migration is planned only on the user's explicit instruction.
+
+Use the actual requested target-language code in `--target-language` (`fr` is only an example). If the user did not specify a target, omit the option and the program stores `ru`. The target is fixed for this book, included in every worker packet, and must match the EPUB metadata `language`. Existing schema-2 books without this field retain Russian and their accepted checks; do not change their target while resuming.
 
 Managed work files and directories must be real files and directories inside the book, not symlinks. A symlink used to select the book root itself is supported. Do not weaken containment checks to make an imported journal pass; inspect the paths and recover its ordinary local files instead. The explicitly chosen author bank remains a separate destination.
 
@@ -43,7 +45,7 @@ The lead is responsible for consistency among Markdown, structured terms, and ge
 
 A packet is stored at `work/packets/part-0001-draft.json`; the command returns its path and SHA-256. The worker returns JSON containing `packet_sha256` and `blocks`, an array of `{id, text}` in source order. `submit part-0001 --record FILE` checks completeness, order, and preserved footnote links; the state write is atomic. An incomplete response does not become an accepted draft. Make a targeted correction by ID.
 
-The `language`, `meaning`, and `terminology` packets are created by the same `packet` command. The language packet contains Russian text, terminology decisions, and rules; it does not include source paragraphs. The language editor works in a separate context.
+The `language`, `meaning`, and `terminology` packets are created by the same `packet` command. Every packet includes `target_language`. The language packet contains target-language text, terminology decisions, and rules; it does not include source paragraphs. The language editor works in a separate context.
 
 The changes file has `packet_sha256`, `changes: [{id, old, new, reason}]`. `patch part-0001 --stage language --record FILE` checks the exact match of `old` and packet version. All changes are applied together; on error, none are applied. Create a fresh packet for review after a text change. No changes does not mean that the range was reviewed.
 
@@ -67,13 +69,13 @@ The default remains meaning-first. A language-first candidate requires compariso
 
 `status` shows the next missing/stale stage for each passage. It checks actual files and hashes rather than trusting a “complete” mark. Changing the original or extracted blocks requires a new intake; do not manually replace the hash to bypass protection. The model selection is pinned by the state hash. Manually replacing the selection stops resumption. For a necessary change, pass a new verified selection and explicit reason through `reselect --selection FILE --reason TEXT`; this preserves selection history, resets calibration and experimental order, and makes old checks stale. Before resuming, tell the user the reason and recalibrate.
 
-`bank --path PATH --author AUTHOR` stores researched decisions separately for an author without erasing context-specific variants. Read the bank for a new book, but compare every variant with the new context and internet evidence. Identical spelling does not prove identical meaning.
+`bank --path PATH --author AUTHOR` stores researched decisions separately for an author and the book's target language without erasing context-specific variants. Use a separate bank file for each target language. Read the bank for a new book, but compare every variant with the new context and internet evidence. Identical spelling does not prove identical meaning.
 
 `usage --record FILE`: unique `task_id`, `scope: "task_delta"`, stage, requested_model, observed_model, input_tokens, cached_input_tokens, output_tokens, metrics_source. Unknown values are null. An identical repeated entry is skipped; a conflict for the same task_id is rejected. Do not submit cumulative totals here. Cache is included in input; reasoning, if included in output, is not added separately.
 
 ## Build
 
-Prepare `metadata.json` (or YAML that Pandoc reads): title, author, lang, rights, source, and unofficial_note marked «Неофициальный перевод». Include author and source information in the book's text blocks as well. Add `epub.css` if needed. Store images in a local assets folder and use relative links. Translate text inside images alongside them, preserving the original scheme.
+Prepare `metadata.json` (or YAML that Pandoc reads): title, author, `language` matching the book's target, rights, source, and an `unofficial_note` written in the target language. For Russian and English, the builder supplies publication section labels. For other target languages, also provide target-language `glossary_title`, `publication_title`, `source_label`, `rights_label`, and `translation_status_label` in metadata. Include author and source information in the book's text blocks as well. Add `epub.css` if needed. Store images in a local assets folder and use relative links. Translate text inside images alongside them, preserving the original scheme.
 
 Relative image paths are based on the book root, even for Markdown files in subfolders. EPUB conversion checks and consumes one combined document with its metadata. Use static HTML/CSS/SVG: active content, external embedded resources, CSS escapes/imports/resource functions, and SVG animations/DTD/processing instructions are rejected. Ordinary CSS, static SVG, fragment links, notes, and citations remain supported. Preserve rejected source material separately and explain the needed conversion; do not bypass these checks.
 

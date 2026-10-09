@@ -84,6 +84,38 @@ class EpubBuilderTests(unittest.TestCase):
             self.assertEqual(archive.infolist()[0].compress_type, zipfile.ZIP_STORED)
             self.assertEqual(archive.read("mimetype"), b"application/epub+zip")
 
+    def test_french_epub_uses_french_publication_labels(self):
+        self.glossary.write_text("Seuil — terme retenu.", encoding="utf-8")
+        self.translation.write_text("# Chapitre\n\nTexte français.\n", encoding="utf-8")
+        self.write_metadata(
+            title="Livre de test", creator="Auteur de test", language="fr",
+            rights="Usage de test.", source="Source de test.",
+            unofficial_note="Traduction non officielle.",
+        )
+        with self.assertRaisesRegex(epub_builder.EpubBuildError, "glossary_title"):
+            self.build(expected_ids=())
+        self.write_metadata(
+            title="Livre de test", creator="Auteur de test", language="fr",
+            rights="Usage de test.", source="Source de test.",
+            unofficial_note="Traduction non officielle.",
+            glossary_title="Glossaire", publication_title="Informations sur l’édition",
+            source_label="Source originale", rights_label="Droits",
+            translation_status_label="Statut de la traduction",
+        )
+        report = self.build(expected_ids=())
+        self.assertTrue(report["reverse_text_checked"])
+        with zipfile.ZipFile(self.output) as archive:
+            xhtml = "\n".join(archive.read(name).decode("utf-8") for name in archive.namelist()
+                              if name.endswith(".xhtml"))
+        self.assertIn("Glossaire", xhtml)
+        self.assertIn("Informations sur l’édition", xhtml)
+        self.assertNotIn("Сведения об издании", xhtml)
+        previous = self.output.read_bytes()
+        with self.assertRaisesRegex(epub_builder.EpubBuildError, "Язык EPUB"):
+            epub_builder.build_epub(self.book, self.translation, self.glossary,
+                                    self.metadata, self.output, expected_language="de")
+        self.assertEqual(self.output.read_bytes(), previous)
+
     def test_missing_local_asset_preserves_previous_epub(self):
         self.translation.write_text("![Нет файла](assets/missing.png)", encoding="utf-8")
         self.output.write_bytes(b"previous-good-epub")

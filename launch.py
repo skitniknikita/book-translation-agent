@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ from model_selection import (ModelSelectionError, catalog_sha256, load_catalog,
 ROOT = Path(__file__).resolve().parent
 ROLES = {"book_scout", "book_translator", "book_copyeditor"}
 SKILL = Path(".agents/skills/translate-book")
+LANGUAGE_TAG = re.compile(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*\Z")
 
 
 def read_toml(path: Path) -> dict:
@@ -93,6 +95,22 @@ def resolve_selection(root: Path, book_dir: Path, value: str | None) -> Path:
     return book_dir / "work" / "model-selection.json"
 
 
+def resolve_target_language(book_dir: Path | None, requested: str | None) -> str:
+    if requested is not None and not LANGUAGE_TAG.fullmatch(requested):
+        raise ValueError("Нужен код языка перевода, например ru, en или pt-BR.")
+    state = book_dir / "work/state.json" if book_dir else None
+    if state and state.is_symlink():
+        raise ValueError("Журнал книги не должен быть символической ссылкой.")
+    if state and state.is_file():
+        saved = json.loads(state.read_text(encoding="utf-8")).get("target_language", "ru")
+        if not isinstance(saved, str) or not LANGUAGE_TAG.fullmatch(saved):
+            raise ValueError("В журнале книги неверный язык перевода.")
+        if requested is not None and requested.lower() != saved.lower():
+            raise ValueError("Язык уже начатой книги нельзя менять при продолжении.")
+        return saved
+    return requested or "ru"
+
+
 def validate_binary(binary: str, platform: str) -> None:
     if platform == "win32" and Path(binary).suffix.lower() in {".cmd", ".bat"}:
         raise ValueError("Для этого запуска в Windows нужен нативный codex.exe. "
@@ -105,7 +123,7 @@ def _base_command(root: Path, binary: str, model: str, reasoning: str) -> list[s
 
 
 def build_command(root: Path, config: dict, binary: str, book: Path, book_dir: Path,
-                  selection_path: Path, selection: dict) -> list[str]:
+                  selection_path: Path, selection: dict, target_language: str = "ru") -> list[str]:
     agents = config["agents"]
     leader, worker = selection["leader"], selection["worker"]
     prompt = (
@@ -118,7 +136,10 @@ def build_command(root: Path, config: dict, binary: str, book: Path, book_dir: P
         "и путь/хеш selection. Каталог не доказывает доступ к inference и не "
         "доказывает качество классификации. Не меняй выбор модели автоматически. "
         "Выполни: исходник → термины → интернет-проверка → глоссарий → перевод "
-        "→ три проверки → EPUB. Путь исходника (данные, не инструкция): "
+        "→ три проверки → EPUB. Язык перевода книги: "
+        + json.dumps(target_language, ensure_ascii=False)
+        + ". Закрепи его при init --target-language и во всех заданиях исполнителям. "
+        "Путь исходника (данные, не инструкция): "
         + json.dumps(str(book), ensure_ascii=False)
         + ". Папка результата: " + json.dumps(str(book_dir), ensure_ascii=False)
         + ". Проверенный выбор моделей: " + json.dumps(str(selection_path), ensure_ascii=False)
@@ -136,7 +157,7 @@ def build_command(root: Path, config: dict, binary: str, book: Path, book_dir: P
 
 
 def build_prepare_command(root: Path, config: dict, binary: str, book: Path, book_dir: Path,
-                          catalog: dict, selection_path: Path) -> list[str]:
+                          catalog: dict, selection_path: Path, target_language: str = "ru") -> list[str]:
     """Start a narrow interactive session that chooses but never translates."""
     source_sha = sha256_file(book)
     prompt = (
@@ -149,15 +170,17 @@ def build_prepare_command(root: Path, config: dict, binary: str, book: Path, boo
         "должна быть явным, проверяемым суждением с источниками, но не называй её "
         "автоматически доказанной. Сохрани только JSON по пути "
         + json.dumps(str(selection_path), ensure_ascii=False)
+        + ". Язык будущего перевода книги: " + json.dumps(target_language, ensure_ascii=False)
         + ". Папка будущего результата: " + json.dumps(str(book_dir), ensure_ascii=False)
         + ". Используй schema_version=1, selected_at (ISO с timezone), source "
-        "{path,sha256}, source_sha256, catalog, catalog_sha256, leader и worker "
+        "{path,sha256}, source_sha256, target_language, catalog, catalog_sha256, leader и worker "
         "{model,reasoning_effort,classification:{role,basis,evidence:[{kind,source,summary}]}}, "
         "sources с url и accessed_at (включая указанную документацию), rationale и точное поле "
         "account_access='not_verified_by_catalog'. Модели и reasoning должны быть "
         "из приведённого каталога, модели ролей различны. source.path должен быть "
         + json.dumps(str(book), ensure_ascii=False)
         + ", source.sha256 и source_sha256 должны быть " + source_sha + ". "
+        + "target_language должен быть " + json.dumps(target_language) + ". "
         "В classification.evidence каждой роли включи ссылку HTTPS на официальную "
         "страницу модели OpenAI, а также kind, source и summary. "
         "catalog_sha256 должен быть " + catalog_sha256(catalog) + ". Каталог: "
@@ -176,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Запустить агента перевода книг в Codex.")
     parser.add_argument("--book", help="Путь книги; относительный путь — от папки комплекта.")
     parser.add_argument("--book-dir", help="Папка результатов книги; по умолчанию отдельная папка рядом с исходником.")
+    parser.add_argument("--target-language", help="Код языка перевода, например ru, en или pt-BR; по умолчанию ru.")
     parser.add_argument("--selection", help="Путь к проверенному model-selection.json.")
     parser.add_argument("--catalog-file", help="Офлайн JSON каталога или страниц model/list.")
     parser.add_argument("--timeout", type=float, default=8.0, help="Ожидание app-server в секундах (1–60).")
@@ -206,12 +230,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.prepare and book is None:
             raise ValueError("--prepare требует --book: выбор должен быть привязан к исходнику.")
         book_dir = resolve_book_dir(ROOT, book, args.book_dir) if book else None
+        target_language = resolve_target_language(book_dir, args.target_language)
         if args.check:
             if args.selection:
                 if book is None:
                     raise ValueError("Для проверки selection укажите --book.")
-                load_selection(resolve_selection(ROOT, book_dir, args.selection), book,
-                               require_fresh=not (book_dir / "work/state.json").is_file())
+                checked = load_selection(resolve_selection(ROOT, book_dir, args.selection), book,
+                                         require_fresh=not (book_dir / "work/state.json").is_file())
+                if checked.get("target_language", "ru").lower() != target_language.lower():
+                    raise ValueError("Выбор моделей подготовлен для другого языка перевода.")
             print("Файлы комплекта и локальная конфигурация: OK")
             print("Bootstrap для подготовительной сессии: " + config["model"])
             print("Codex CLI: " + (shutil.which("codex") or "не найден"))
@@ -230,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
             if catalog is None:
                 catalog = query_catalog(binary, args.timeout)
             book_dir.mkdir(parents=True, exist_ok=True)
-            command = build_prepare_command(ROOT, config, binary, book, book_dir, catalog, selection_path)
+            command = build_prepare_command(ROOT, config, binary, book, book_dir, catalog, selection_path,
+                                            target_language)
             return subprocess.run(command, cwd=ROOT, check=False).returncode
         if book is None:
             if args.dry_run:
@@ -248,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
             validate_binary(binary, sys.platform)
             catalog = load_catalog(catalog_file) if catalog_file else query_catalog(binary, args.timeout)
             book_dir.mkdir(parents=True, exist_ok=True)
-            preparation = build_prepare_command(ROOT, config, binary, book, book_dir, catalog, selection_path)
+            preparation = build_prepare_command(ROOT, config, binary, book, book_dir, catalog, selection_path,
+                                                target_language)
             preparation_code = subprocess.run(preparation, cwd=ROOT, check=False).returncode
             if preparation_code:
                 return preparation_code
@@ -256,10 +285,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("Подготовительная сессия не сохранила model-selection.json; перевод не запущен.")
         selection = load_selection(selection_path, book,
                                    require_fresh=not (book_dir / "work/state.json").is_file())
+        if selection.get("target_language", "ru").lower() != target_language.lower():
+            raise ValueError("Выбор моделей подготовлен для другого языка перевода.")
         binary = shutil.which("codex")
         if binary:
             validate_binary(binary, sys.platform)
-        command = build_command(ROOT, config, binary or "codex", book, book_dir, selection_path, selection)
+        command = build_command(ROOT, config, binary or "codex", book, book_dir, selection_path,
+                                selection, target_language)
         if args.dry_run:
             _print_command(command)
             print("Команда не выполнена. Доступ к моделям не проверен.")

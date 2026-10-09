@@ -496,6 +496,83 @@ class BookWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow.bank_merge(bank, "Author", [first]), 2)
         with self.assertRaisesRegex(ValueError, "другому автору"):
             workflow.bank_merge(bank, "Other", [first])
+        with self.assertRaisesRegex(ValueError, "другому языку"):
+            workflow.bank_merge(bank, "Author", [{"source": "threshold", "target": "seuil"}], "fr")
+
+    def test_target_language_is_pinned_and_sent_to_every_worker(self):
+        selection = self.selection() | {"target_language": "fr"}
+        book = workflow.Book.initialize(self.root, self.source, self.blocks(), selection,
+                                        target_language="fr")
+        self.assertEqual(book.state["target_language"], "fr")
+        book.plan()
+        scout = book.packet("part-0001", "scout")
+        self.assertEqual(workflow.read_json(scout["path"])["target_language"], "fr")
+        self.approve_glossary(book, target="seuil")
+        draft = book.packet("part-0001", "draft")
+        packet = workflow.read_json(draft["path"])
+        self.assertEqual(packet["target_language"], "fr")
+        self.assertEqual(packet["versions"]["target_language"], "fr")
+        book.state["target_language"] = "de"
+        book.save()
+        with self.assertRaisesRegex(ValueError, "Язык перевода в журнале изменён"):
+            workflow.Book(self.root)
+        with self.assertRaisesRegex(ValueError, "код языка"):
+            workflow.Book.initialize(self.root / "invalid", self.source, self.blocks(),
+                                     target_language="fr_invalid")
+        with self.assertRaisesRegex(ValueError, "другого языка"):
+            workflow.Book.initialize(self.root / "wrong-selection", self.source, self.blocks(),
+                                     self.selection(), target_language="fr")
+
+    def test_old_schema_two_state_keeps_russian_reviews_current(self):
+        book = self.create()
+        state = book.state
+        state.pop("target_language")
+        state.pop("target_language_sha256")
+        book.save()
+        resumed = workflow.Book(self.root)
+        self.assertNotIn("target_language", resumed.state)
+        self.approve_glossary(resumed)
+        resumed.plan()
+        packet = resumed.packet("part-0001", "scout")
+        self.assertEqual(workflow.read_json(packet["path"])["target_language"], "ru")
+        self.assertNotIn("target_language", resumed.versions(resumed.chunk("part-0001")))
+        self.calibrate(resumed)
+        self.accept(resumed, "part-0001")
+        self.assertTrue(workflow.Book(self.root).status()["ready"])
+
+    def test_french_book_builds_only_with_matching_epub_language(self):
+        selection = self.selection() | {"target_language": "fr"}
+        book = workflow.Book.initialize(self.root, self.source, self.blocks(), selection,
+                                        target_language="fr")
+        self.approve_glossary(book, target="seuil")
+        self.calibrate(book)
+        book.plan()
+        packet = book.packet("part-0001", "draft")
+        book.submit("part-0001", {"packet_sha256": packet["sha256"], "blocks": [
+            {"id": "h1", "text": "# Première partie"},
+            {"id": "p1", "text": "Un seuil apparaît ici[^n1]."},
+            {"id": "n1", "text": "[^n1]: La note garde son repère."},
+        ]})
+        for stage in workflow.STAGES:
+            self.review(book, "part-0001", stage)
+        metadata = {
+            "title": "Livre de test", "creator": "Auteur de test", "language": "fr",
+            "rights": "Usage de test.", "source": "Source de test.",
+            "unofficial_note": "Traduction non officielle.",
+            "glossary_title": "Glossaire", "publication_title": "Informations sur l’édition",
+            "source_label": "Source originale", "rights_label": "Droits",
+            "translation_status_label": "Statut de la traduction",
+        }
+        self.write("metadata.json", json.dumps(metadata, ensure_ascii=False))
+        result = book.build("Livre de test.epub")
+        self.assertTrue(result["reverse_text_checked"])
+        self.assertTrue(book.status()["epub_current"])
+        previous = (self.root / "Livre de test.epub").read_bytes()
+        metadata["language"] = "ru"
+        self.write("metadata.json", json.dumps(metadata, ensure_ascii=False))
+        with self.assertRaisesRegex(ValueError, "Язык EPUB"):
+            book.build("Livre de test.epub")
+        self.assertEqual((self.root / "Livre de test.epub").read_bytes(), previous)
 
     def test_assemble_waits_for_every_review_and_preserves_block_order_and_notes(self):
         book = self.create()

@@ -4,13 +4,13 @@ English | [Русский](README.ru.md)
 
 A research-first book translation workflow for Codex. A capable lead model researches terminology and checks every passage against the original. Smaller models draft and copyedit; Python scripts preserve progress and assemble the EPUB.
 
-Designed for philosophy and humanities books. The agent replies in the language you use unless you request another. This does not change the book's target language: the current workflow defaults to **Russian for book translations**. Translation into other target languages has not been validated. The main documentation and agent instructions are in English; Russian terminology examples, output filenames, and some script messages are retained. This is an independent project, not an official OpenAI product.
+Designed for philosophy and humanities books. The agent replies in the language you use unless you request another. The book is translated into the **target language you request**; Russian is the default if you do not specify one. The main documentation and agent instructions are in English; Russian examples, output filenames, and some script messages are retained. This is an independent project, not an official OpenAI product.
 
 **Status:** early release. Local tests cover workflow bookkeeping and EPUB assembly. Full-book savings, translation quality across model combinations, and end-to-end operation on other machines have not been benchmarked.
 
 ## What you get
 
-- **A researched glossary before translation.** The agent examines the full source, checks prior translations of the author, and researches published translations, publishers, and academic sources online. Decisions include evidence, context, alternatives, and confidence.
+- **A researched glossary before translation.** The agent examines the full source, checks prior translations of the author into the chosen target language, and researches published translations, publishers, and academic sources online. Decisions include evidence, context, alternatives, and confidence.
 - **Large-model supervision.** Smaller workers handle bounded assignments. The lead approves terminology, resolves difficult passages, and performs the complete semantic comparison. There are at most two concurrent workers.
 - **Model selection per book.** The agent uses the current Codex catalog and official documentation, then tests the chosen pair on ordinary and difficult passages. A catalog entry alone does not prove access or translation quality.
 - **Resumable work.** Source blocks, tasks, drafts, edits, review evidence, and accepted summaries are saved. Changes invalidate affected checks.
@@ -35,6 +35,8 @@ to save progress. Preserve the original file.
 ```
 
 Replace `my-book.epub` with your filename. If the skill is not discovered, ask Codex to read [.agents/skills/translate-book/SKILL.md](.agents/skills/translate-book/SKILL.md). To try a small, original sample first, see [examples](examples/README.md).
+
+For another target language, name it in the request, for example “translate into French.” With the terminal launcher, pass `--target-language fr`. The agent records that choice for the book and supplies target-language EPUB section labels; the program checks that the EPUB language matches it. Use a separate output directory if translating the same source into another language. The quality of a given model pair is still calibrated on passages from that book.
 
 An instruction cannot change the model of an already open chat. If selection calls for a different lead model, select it in the app when the agent asks. The CLI launcher can start a new session with the selected model.
 
@@ -79,7 +81,7 @@ On Windows, Python may be invoked as `py -3`. The launcher requires a native `co
 ```text
 Inspect the complete source → research and approve the glossary
 → calibrate the selected models → draft in bounded assignments
-→ semantic review + Russian copyedit + terminology review
+→ semantic review + target-language copyedit + terminology review
 → assemble and validate the EPUB
 ```
 

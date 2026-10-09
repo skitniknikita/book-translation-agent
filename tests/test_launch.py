@@ -97,6 +97,32 @@ class LaunchTests(unittest.TestCase):
             run.assert_not_called()
         self.assertIn("future-leader-42", out.getvalue())
 
+    def test_target_language_is_forwarded_and_cannot_change_on_resume(self):
+        selection_path = self.write_selection()
+        selection_path.write_text(json.dumps(self.selection() | {"target_language": "fr"}), encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out), patch.object(launch, "ROOT", self.root), \
+             patch.object(launch.shutil, "which", return_value="codex"):
+            self.assertEqual(launch.main(["--book", str(self.book),
+                                          "--target-language", "fr", "--dry-run"]), 0)
+        self.assertIn('Язык перевода книги: "fr"', out.getvalue())
+        book_dir = launch.resolve_book_dir(self.root, self.book, None)
+        state = book_dir / "work/state.json"
+        state.write_text(json.dumps({"target_language": "fr"}), encoding="utf-8")
+        self.assertEqual(launch.resolve_target_language(book_dir, None), "fr")
+        with self.assertRaisesRegex(ValueError, "нельзя менять"):
+            launch.resolve_target_language(book_dir, "de")
+
+    def test_check_rejects_selection_for_another_target_language(self):
+        selection_path = self.write_selection()
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err), \
+             patch.object(launch, "ROOT", self.root):
+            result = launch.main(["--book", str(self.book), "--target-language", "fr",
+                                  "--selection", str(selection_path), "--check"])
+        self.assertEqual(result, 2)
+        self.assertIn("другого языка", err.getvalue())
+
     def test_check_does_not_start_process_or_catalog(self):
         with redirect_stdout(io.StringIO()), patch.object(launch, "ROOT", self.root), \
              patch.object(launch, "query_catalog") as catalog, \

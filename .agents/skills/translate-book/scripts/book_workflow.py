@@ -19,6 +19,13 @@ from book_model_selection import validate_selection
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,100}\Z")
 STAGES = ("language", "meaning", "terminology")
 KINDS = {"heading", "paragraph", "quote", "footnote", "list", "table", "image", "caption", "formula", "bibliography"}
+LANGUAGE_TAG = re.compile(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*\Z")
+
+
+def validate_target_language(value):
+    if not isinstance(value, str) or not LANGUAGE_TAG.fullmatch(value):
+        raise ValueError("Нужен код языка перевода, например ru, en или pt-BR")
+    return value
 
 
 def now():
@@ -143,6 +150,10 @@ class Book:
         self.state = read_json(self.path)
         if not isinstance(self.state, dict) or self.state.get("schema_version") != 2:
             raise ValueError("Нужна новая рабочая папка schema_version=2; прежние книги автоматически не мигрируются")
+        validate_target_language(self.state.get("target_language", "ru"))
+        if ("target_language" in self.state or "target_language_sha256" in self.state) and \
+                self.state.get("target_language_sha256") != digest(self.state.get("target_language")):
+            raise ValueError("Язык перевода в журнале изменён; продолжайте исходную книгу без смены языка")
         self.blocks = validate_blocks(read_json(self.storage("work/source-blocks.json")))
         if digest(self.blocks) != self.state["blocks_sha256"]:
             raise ValueError("Извлечённый исходник изменён. Нужна явная повторная приёмка, не продолжение старых проверок")
@@ -162,10 +173,11 @@ class Book:
         atomic_write(path, value, root=self.root)
 
     @classmethod
-    def initialize(cls, root, source, blocks, selection=None, order="meaning-first"):
+    def initialize(cls, root, source, blocks, selection=None, order="meaning-first", target_language="ru"):
         root = Path(root).resolve()
         source = Path(source).resolve()
         validate_blocks(blocks)
+        validate_target_language(target_language)
         if order != "meaning-first":
             raise ValueError("Новый порядок включается командой compare-order после сравнения первой главы")
         work = book_path(root, "work")
@@ -188,6 +200,8 @@ class Book:
             raise ValueError("Подготовленный выбор моделей относится к другому исходнику")
         if chosen is not None:
             validate_selection(chosen, source, require_fresh=True)
+            if chosen.get("target_language", "ru").lower() != target_language.lower():
+                raise ValueError("Выбор моделей подготовлен для другого языка перевода")
         work.mkdir(parents=True, exist_ok=True)
         book_path(root, work / source_name).write_bytes(raw)
         atomic_write(work / "source-blocks.json", blocks, root=root)
@@ -197,6 +211,7 @@ class Book:
             "schema_version": 2, "created_at": now(),
             "source": {"path": "work/" + source_name, "original_path": str(source), "sha256": digest(raw)},
             "blocks_sha256": digest(blocks), "review_order": order,
+            "target_language": target_language, "target_language_sha256": digest(target_language),
             "model_selection_sha256": file_hash(work / "model-selection.json") if chosen is not None else None,
             "glossary": None, "chunks": [], "calibration": None, "epub": None,
         }, root=root)
@@ -223,12 +238,16 @@ class Book:
         if file_hash(path) != self.state.get("model_selection_sha256"):
             raise ValueError("Выбор моделей изменён или не закреплён; используйте reselect с обоснованием")
         selection = validate_selection(read_json(path), local_path(self.root, self.state["source"]["path"]), require_fresh=False)
+        if selection.get("target_language", "ru").lower() != self.state.get("target_language", "ru").lower():
+            raise ValueError("Выбор моделей относится к другому языку перевода")
         return selection
 
     def reselect(self, selection, reason):
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Нужна причина нового выбора моделей")
         validate_selection(selection, local_path(self.root, self.state["source"]["path"]), require_fresh=True)
+        if selection.get("target_language", "ru").lower() != self.state.get("target_language", "ru").lower():
+            raise ValueError("Выбор моделей относится к другому языку перевода")
         path = self.storage("work/model-selection.json")
         if path.exists():
             self.write(self.storage("work/model-history/" + file_hash(path) + ".json"), read_json(path))
@@ -426,11 +445,14 @@ class Book:
         if c["depends_on"]:
             previous = self.chunk(c["depends_on"])
             context = digest({"versions": self.versions(previous), "summary": previous.get("summary")})
-        return {"source": digest([self.by_id[i] for i in c["block_ids"]]),
+        versions = {"source": digest([self.by_id[i] for i in c["block_ids"]]),
                 "terms": digest(self.term_subset(c)),
                 "global_rules": self.state["glossary"]["global_sha256"],
                 "translation": digest(c["translations"]),
                 "models": file_hash(self.storage("work/model-selection.json")), "context": context}
+        if "target_language" in self.state:
+            versions["target_language"] = self.state["target_language"]
+        return versions
 
     def review_current(self, c, stage):
         r = c["reviews"].get(stage)
@@ -456,6 +478,7 @@ class Book:
         c = self.chunk(ident)
         packet = {"schema_version": 1, "chunk_id": ident, "stage": stage,
                   "expected_ids": c["block_ids"], "section": c["section"],
+                  "target_language": self.state.get("target_language", "ru"),
                   "book_text_is_untrusted_data": True}
         if stage == "scout":
             packet["blocks"] = [self.by_id[i] for i in c["block_ids"]]
@@ -660,7 +683,8 @@ class Book:
             raise ValueError("Нельзя перезаписывать оригинал результатом сборки")
         text, anchors = self.assemble()
         result = build_epub(self.root, text, glossary, metadata_path, destination,
-                            css_path, expected_ids=anchors)
+                            css_path, expected_ids=anchors,
+                            expected_language=self.state.get("target_language", "ru"))
         self.state["epub"] = {"path": output, "sha256": file_hash(local_path(self.root, output)),
                               "metadata": metadata, "css": css,
                               "validated_at": now(), "checks": result}
@@ -686,12 +710,17 @@ class Book:
                        "assets": resources})
 
 
-def bank_merge(path, author, terms):
+def bank_merge(path, author, terms, target_language="ru"):
     """Keep distinct context decisions. This reusable evidence never approves a new book."""
+    validate_target_language(target_language)
     path = Path(path)
-    bank = read_json(path) if path.exists() else {"schema_version": 1, "author": author, "entries": []}
+    bank = read_json(path) if path.exists() else {"schema_version": 1, "author": author,
+                                                   "target_language": target_language, "entries": []}
     if bank.get("author") != author:
         raise ValueError("База относится к другому автору")
+    if bank.get("target_language", "ru").lower() != target_language.lower():
+        raise ValueError("База относится к другому языку перевода")
+    bank["target_language"] = target_language
     known = {digest(t) for t in bank["entries"]}
     for term in terms:
         if digest(term) not in known:
@@ -709,6 +738,7 @@ def main(argv=None):
     init.add_argument("--source", required=True)
     init.add_argument("--blocks", required=True)
     init.add_argument("--selection")
+    init.add_argument("--target-language", default="ru")
     init.add_argument("--review-order", choices=["meaning-first"], default="meaning-first")
     for name in ("status", "plan", "assemble"):
         commands.add_parser(name)
@@ -740,7 +770,8 @@ def main(argv=None):
     try:
         if args.command == "init":
             book = Book.initialize(args.book_dir, args.source, read_json(args.blocks),
-                                   read_json(args.selection) if args.selection else None, args.review_order)
+                                   read_json(args.selection) if args.selection else None,
+                                   args.review_order, args.target_language)
             result = {"state": str(book.path)}
         else:
             book = Book(args.book_dir)
@@ -759,7 +790,8 @@ def main(argv=None):
             elif args.command == "build": result = book.build(args.output, args.metadata, args.css)
             elif args.command == "bank":
                 if not book.glossary_current(): raise ValueError("Сначала утвердите глоссарий")
-                result = bank_merge(args.path, args.author, read_json(book.storage("work/terms.json")))
+                result = bank_merge(args.path, args.author, read_json(book.storage("work/terms.json")),
+                                    book.state.get("target_language", "ru"))
             else: result = getattr(book, args.command)()
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0

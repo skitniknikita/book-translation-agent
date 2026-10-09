@@ -49,6 +49,14 @@ class ModelSelectionTests(unittest.TestCase):
         selection = self.selection()
         self.assertEqual(models.validate_selection(selection, self.book, require_fresh=True), selection)
 
+    def test_optional_target_language_code_is_validated(self):
+        selection = self.selection()
+        selection["target_language"] = "fr-CA"
+        self.assertEqual(models.validate_selection(selection, self.book, require_fresh=True), selection)
+        selection["target_language"] = ["fr"]
+        with self.assertRaisesRegex(models.ModelSelectionError, "код языка"):
+            models.validate_selection(selection, self.book, require_fresh=True)
+
     def test_stale_selection_rejected_only_for_a_new_book(self):
         selection = self.selection()
         selection["selected_at"] = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()

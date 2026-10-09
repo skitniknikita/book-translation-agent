@@ -1,7 +1,8 @@
 # Initial release — draft publication notes
 
 Book Translation Agent is a Codex workflow for translating philosophy and humanities
-books into Russian with researched terminology and checked EPUB output.
+books into the requested target language, with Russian as the default, researched
+terminology, and checked EPUB output.
 
 ## Included
 

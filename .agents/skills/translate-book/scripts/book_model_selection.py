@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -21,6 +22,7 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = 1
 CATALOG_MAX_AGE_DAYS = 14
 OFFICIAL_MODEL_LIST_DOCS = "https://learn.chatgpt.com/docs/app-server#models"
+LANGUAGE_TAG = re.compile(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*\Z")
 
 
 class ModelSelectionError(ValueError):
@@ -295,6 +297,9 @@ def _validate_timestamp_freshness(value: Any, label: str, now: datetime, require
 def validate_selection(selection: dict[str, Any], book: Path, *, require_fresh: bool) -> dict[str, Any]:
     if not isinstance(selection, dict) or selection.get("schema_version") != SCHEMA_VERSION:
         raise ModelSelectionError("Нужен model-selection.json поддерживаемой версии.")
+    target_language = selection.get("target_language", "ru")
+    if not isinstance(target_language, str) or not LANGUAGE_TAG.fullmatch(target_language):
+        raise ModelSelectionError("В выборе моделей нужен корректный код языка перевода.")
     source = selection.get("source")
     if not isinstance(source, dict) or not isinstance(source.get("path"), str):
         raise ModelSelectionError("Selection привязан к другому пути исходника.")
